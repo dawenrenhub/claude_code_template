@@ -73,14 +73,27 @@ FALLBACK_FILES=(
     ".mcp.json"
     "playwright.config.ts"
     "tests/e2e/example.spec.ts"
+    ".eslintrc.json"
+    ".prettierrc"
+    "vitest.config.ts"
+    "jest.config.cjs"
+    "pytest.ini"
+    "ruff.toml"
+    "mypy.ini"
+    ".github/workflows/ci.yml"
+    "Makefile"
 )
 
 FALLBACK_DIRS=(
     "logs"
     "docs"
     "playwright"
+    "tests/unit"
     "tests/e2e"
     "tests"
+    "src"
+    ".github/workflows"
+    ".github"
 )
 
 # ==========================================
@@ -101,7 +114,7 @@ ${CYAN}选项:${NC}
     --no-backup         跳过备份
         --category=<name>   仅删除指定类别
                         可选: mcp-config,
-                            test-examples, meta-files
+                            tooling-config, test-examples, meta-files
     --purge-empty-dirs  额外清理所有空目录
     --project-dir=<dir> 指定要卸载的项目目录
 
@@ -109,7 +122,7 @@ ${CYAN}示例:${NC}
     ./uninstall.sh                    # 交互式卸载
     ./uninstall.sh --dry-run          # 预览将删除的文件
     ./uninstall.sh -y --backup        # 备份后删除全部
-    ./uninstall.sh --category=test-examples # 仅删除测试示例
+    ./uninstall.sh --category=tooling-config # 仅删除工具链/测试配置
     ./uninstall.sh --purge-empty-dirs # 清理空目录
     ./uninstall.sh --project-dir=foo  # 指定项目目录
 
@@ -302,9 +315,10 @@ resolve_project_dir() {
     }
 
     mapfile -t marker_paths < <(find "$SCRIPT_DIR" -maxdepth 4 \( -type f -o -type d \) \( \
-        -name ".mcp.json" \
+        -name ".mcp.json" -o -name ".eslintrc.json" -o -name "vitest.config.ts" -o -name "jest.config.cjs" \
         -o -path "*/tests/e2e/example.spec.ts" \
-        -o -path "*/logs" -o -path "*/docs" -o -path "*/playwright" -o -path "*/tests" \
+        -o -path "*/logs" -o -path "*/docs" -o -path "*/playwright" -o -path "*/tests" -o -path "*/src" \
+        -o -path "*/.github" \
     \) 2>/dev/null)
 
     if [ ${#marker_paths[@]} -ge 1 ]; then
@@ -512,6 +526,7 @@ get_categories() {
         jq -r '.categories | keys[]' "$MANIFEST_FILE" 2>/dev/null
     else
         echo "mcp-config"
+        echo "tooling-config"
         echo "test-examples"
         echo "meta-files"
     fi
@@ -525,6 +540,7 @@ get_category_name() {
         case "$category" in
             mcp-config) echo "MCP 配置" ;;
             backend-init) echo "后端初始化" ;;
+            tooling-config) echo "工具链与测试配置" ;;
             test-examples) echo "测试示例" ;;
             meta-files) echo "项目元文件" ;;
             *) echo "$category" ;;
@@ -540,6 +556,17 @@ get_category_files() {
         case "$category" in
             mcp-config)
                 echo ".mcp.json"
+                ;;
+            tooling-config)
+                echo ".eslintrc.json"
+                echo ".prettierrc"
+                echo "vitest.config.ts"
+                echo "jest.config.cjs"
+                echo "pytest.ini"
+                echo "ruff.toml"
+                echo "mypy.ini"
+                echo ".github/workflows/ci.yml"
+                echo "Makefile"
                 ;;
             test-examples)
                 echo "tests/e2e/example.spec.ts"
@@ -560,13 +587,19 @@ get_category_dirs() {
         case "$category" in
             mcp-config)
                 ;;
+            tooling-config)
+                echo ".github/workflows"
+                echo ".github"
+                ;;
             test-examples)
+                echo "tests/unit"
                 echo "tests/e2e"
                 echo "tests"
                 ;;
             meta-files)
                 echo "logs"
                 echo "docs"
+                echo "src"
                 ;;
         esac
     fi
@@ -793,8 +826,12 @@ main() {
         "logs"
         "docs"
         "playwright"
+        "tests/unit"
         "tests/e2e"
         "tests"
+        "src"
+        ".github/workflows"
+        ".github"
     )
     for ((i=${#cleanup_dirs[@]}-1; i>=0; i--)); do
         remove_empty_dir "${cleanup_dirs[i]}"

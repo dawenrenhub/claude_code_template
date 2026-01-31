@@ -7,7 +7,7 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-REQ_FILE="my_requirement.md"
+REQ_FILE="my_requirement.txt"
 
 if ! command -v claude &> /dev/null; then
   echo -e "${RED}❌ 未找到 claude CLI，请先运行 install.sh 安装依赖${NC}"
@@ -37,7 +37,7 @@ fi
 echo -e "${CYAN}🚀 启动 Claude Code（交互式）...${NC}"
 echo -e "${YELLOW}提示：完成 /brainstorm 后请退出 Claude，脚本会进入下一步。${NC}"
 
-read -r -d '' INITIAL_PROMPT << 'EOF'
+if ! claude "$(cat <<'EOF'
 你将与我进行交互式需求澄清，并最终输出项目计划。
 
 要求：
@@ -48,14 +48,23 @@ read -r -d '' INITIAL_PROMPT << 'EOF'
 
 现在开始向我提问以收集需求。
 EOF
+)"; then
+  echo -e "${RED}❌ Claude CLI 启动失败或已退出，请检查登录状态或网络${NC}"
+  exit 1
+fi
 
-claude "$INITIAL_PROMPT"
+read -p "是否已完成 /brainstorm 并生成 design 文档? [y/N]: " BRAINSTORM_DONE
+if [[ ! "$BRAINSTORM_DONE" =~ ^[Yy]$ ]]; then
+  echo -e "${YELLOW}⚠️ 未完成 /brainstorm，已退出。请完成后重新运行脚本。${NC}"
+  exit 1
+fi
 
 # ==========================================
 # Step 2: 使用 /write-plan 基于最新 design.md 生成待办清单
 # ==========================================
 
 PLAN_DIR="docs/plans"
+mkdir -p "$PLAN_DIR"
 
 if [ ! -d "$PLAN_DIR" ]; then
   echo -e "${RED}❌ 未找到 $PLAN_DIR，请先确保 superpowers 已生成 design 文档${NC}"
@@ -71,16 +80,18 @@ fi
 
 echo -e "${GREEN}✓ 最新 design 文件: $LATEST_DESIGN_FILE${NC}"
 
-read -r -d '' WRITE_PLAN_PROMPT << EOF
+echo -e "${CYAN}🚀 启动 Claude Code(交互式)生成待办清单...${NC}"
+if ! claude "$(cat <<EOF
 请使用 superpowers 的 /write-plan 功能调取最新生成的design.md生成待办清单。
 设计文档路径：$LATEST_DESIGN_FILE
 EOF
-
-echo -e "${CYAN}🚀 启动 Claude Code(交互式)生成待办清单...${NC}"
-claude "$WRITE_PLAN_PROMPT"
+)"; then
+  echo -e "${RED}❌ Claude CLI 启动失败或已退出，请检查登录状态或网络${NC}"
+  exit 1
+fi
 
 # ==========================================
-# Step 3: 汇总 design + todo 清单到 my_requirement.md
+# Step 3: 汇总 design + todo 清单到 my_requirement.txt
 # ==========================================
 
 echo -e "${CYAN}🧾 汇总 plan 文档到 $REQ_FILE...${NC}"
@@ -111,7 +122,7 @@ if [ -n "$RECENT_PLAN_FILES" ]; then
 fi
 
 # ==========================================
-# Step 4: Headless 整理 my_requirement.md
+# Step 4: Headless 整理 my_requirement.txt
 # ==========================================
 
 read -r -d '' CLEANUP_PROMPT << EOF

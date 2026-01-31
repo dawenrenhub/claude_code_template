@@ -1,49 +1,16 @@
 # ==========================================
-# Ralph Loop - Git Ignore
+# Git Ignore (allowlist only)
 # ==========================================
 
-# Ralph runtime
-logs/
-.ralph/
-.claude/settings.local.json
-test-results/
-playwright-report/
+# Ignore everything by default
+*
 
-# Node.js
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Build outputs
-dist/
-build/
-.next/
-.nuxt/
-.output/
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-
-# Backup files
-*.backup.*
-*.bak
+# Allow only these files at repo root
+!.gitignore
+!init.sh
+!install.sh
+!planning.sh
+!README.md
+!readme.md
+!restore.sh
+!uninstall.sh
