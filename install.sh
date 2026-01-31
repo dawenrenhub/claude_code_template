@@ -1,14 +1,13 @@
 #!/bin/bash
 
 # ==========================================
-# Ralph Loop V7.1: 修复 Gemini/GPT 指出的问题
+# Ralph Loop V7.2: 项目初始化版
 # ==========================================
-# 修复内容:
-# 1. 加回 Browser-use MCP
-# 2. Stop Hook 只检查最后一条 assistant 消息，避免误触发
-# 3. Gate 失败信息落盘，解决"从头开始"无记忆问题
-# 4. 更精确的 Token 匹配
-# 5. 更智能的端口检测
+# 新功能:
+# 1. 自动下载 ralph-claude-code 模板
+# 2. 检测并安装 Superpowers
+# 3. 支持新项目/已有项目 clone
+# 4. 项目类型选择和配置
 # ==========================================
 
 set -e
@@ -17,10 +16,14 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
 YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
+# 当前脚本所在目录 (模板根目录)
+TEMPLATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 echo -e "${BLUE}══════════════════════════════════════════${NC}"
-echo -e "${BLUE}🔧 Ralph Loop V7.1: 问题修复版${NC}"
+echo -e "${BLUE}🔧 Ralph Loop V7.2: 项目初始化版${NC}"
 echo -e "${BLUE}══════════════════════════════════════════${NC}"
 
 # ==========================================
@@ -29,12 +32,11 @@ echo -e "${BLUE}═════════════════════�
 if [[ "$(uname)" != "Linux" ]]; then
     echo -e "${RED}❌ 此脚本仅支持 Linux 系统${NC}"
     echo -e "${YELLOW}   检测到: $(uname)${NC}"
-    echo -e "${YELLOW}   macOS 用户请注意: sed -i 等命令语法不兼容${NC}"
     exit 1
 fi
 
 # ==========================================
-# 0. 依赖检查
+# Step 0: 依赖检查
 # ==========================================
 echo -e "\n${YELLOW}[Step 0] 检查依赖...${NC}"
 
@@ -77,7 +79,16 @@ check_dependency() {
                     install_with_apt jq
                 else
                     echo -e "${RED}❌ 无法自动安装 jq，请手动安装${NC}"
-                    echo "   安装方式: $2"
+                    exit 1
+                fi
+                ;;
+            git)
+                if [ "$os_manager" = "brew" ]; then
+                    install_with_brew git
+                elif [ "$os_manager" = "apt" ]; then
+                    install_with_apt git
+                else
+                    echo -e "${RED}❌ 无法自动安装 git，请手动安装${NC}"
                     exit 1
                 fi
                 ;;
@@ -89,7 +100,6 @@ check_dependency() {
                     install_with_apt python3-pip
                 else
                     echo -e "${RED}❌ 无法自动安装 python3，请手动安装${NC}"
-                    echo "   安装方式: $2"
                     exit 1
                 fi
                 ;;
@@ -101,12 +111,9 @@ check_dependency() {
                     install_with_apt npm
                 else
                     echo -e "${RED}❌ 无法自动安装 npx，请手动安装${NC}"
-                    echo "   安装方式: $2"
                     exit 1
                 fi
-                # 二次校验 npx，若仍缺失则回退安装
                 if ! command -v npx &> /dev/null; then
-                    echo -e "${YELLOW}⚠️ npx 仍未找到，尝试 npm install -g npx...${NC}"
                     npm install -g npx
                 fi
                 ;;
@@ -127,37 +134,16 @@ check_dependency() {
                 if command -v node &> /dev/null; then
                     NODE_MAJOR=$(node -v | sed 's/^v//' | cut -d. -f1)
                     if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 18 ]; then
-                        echo -e "${YELLOW}⚠️ Node.js 版本过低 (当前: $(node -v)). 尝试自动升级到 >= 18...${NC}"
-                        if [ "$os_manager" = "brew" ]; then
-                            brew upgrade node || install_with_brew node
-                        elif [ "$os_manager" = "apt" ]; then
-                            install_with_apt nodejs
-                            install_with_apt npm
-                        else
-                            echo -e "${RED}❌ 无法自动升级 Node.js，请手动升级到 >= 18${NC}"
-                            exit 1
-                        fi
-                        NODE_MAJOR=$(node -v | sed 's/^v//' | cut -d. -f1)
-                        if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 18 ]; then
-                            echo -e "${RED}❌ Node.js 升级后仍不足 18 (当前: $(node -v))${NC}"
-                            echo "   请手动升级 Node.js 后再继续。"
-                            exit 1
-                        fi
+                        echo -e "${YELLOW}⚠️ Node.js 版本过低 (当前: $(node -v)). 需要 >= 18${NC}"
+                        exit 1
                     fi
-                else
-                    echo -e "${RED}❌ 未找到 node 命令，请手动安装 Node.js >= 18${NC}"
-                    exit 1
                 fi
-                # 安装/降级 Claude CLI 到指定版本 (<= 2.076)
                 npm install -g @anthropic-ai/claude-code@2.076
                 ;;
             uvx)
-                # 优先使用 pipx 安装 uv (符合 PEP 668 规范)
                 if command -v pipx &> /dev/null; then
                     pipx install uv
                 elif command -v apt-get &> /dev/null; then
-                    # 先安装 pipx
-                    echo -e "${YELLOW}⚠️ 安装 pipx...${NC}"
                     if command -v sudo &> /dev/null; then
                         sudo apt-get update -y
                         sudo apt-get install -y pipx
@@ -165,28 +151,21 @@ check_dependency() {
                         apt-get update -y
                         apt-get install -y pipx
                     fi
-                    # 确保 pipx 路径可用
                     pipx ensurepath 2>/dev/null || true
                     export PATH="$HOME/.local/bin:$PATH"
-                    # 用 pipx 安装 uv
                     pipx install uv
                 else
-                    # 回退方案：使用 --break-system-packages
-                    echo -e "${YELLOW}⚠️ 尝试使用 pip 安装 (带 --break-system-packages)...${NC}"
                     if command -v pip3 &> /dev/null; then
                         pip3 install --break-system-packages uv
-                    elif command -v pip &> /dev/null; then
-                        pip install --break-system-packages uv
                     else
                         echo -e "${RED}❌ 无法安装 uv，请手动安装: pipx install uv${NC}"
                         exit 1
                     fi
                 fi
-                # 确保 uvx 在 PATH 中
                 export PATH="$HOME/.local/bin:$PATH"
                 ;;
             *)
-                echo -e "${RED}❌ 未知依赖: $1，无法自动安装${NC}"
+                echo -e "${RED}❌ 未知依赖: $1${NC}"
                 exit 1
                 ;;
         esac
@@ -198,82 +177,1093 @@ check_dependency() {
     echo -e "${GREEN}✓ $1${NC}"
 }
 
+check_dependency "git" "apt install git"
 check_dependency "jq" "apt install jq"
 check_dependency "python3" "apt install python3"
 check_dependency "npx" "npm install -g npx"
 check_dependency "claude" "npm install -g @anthropic-ai/claude-code"
-
-# 检查 uvx (browser-use 需要)
 check_dependency "uvx" "pip install uv"
 
-# 检查 Python 版本 (需要 >= 3.9，因为使用了 tuple[bool, str] 语法)
-echo -e "${YELLOW}检查 Python 版本...${NC}"
-PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
-PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
-
-if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 9 ]); then
-    echo -e "${YELLOW}⚠️ Python 版本过低: $PYTHON_VERSION，需要 >= 3.9${NC}"
-    echo -e "${YELLOW}   尝试自动升级 Python...${NC}"
-    
-    if command -v apt-get &> /dev/null; then
-        # 添加 deadsnakes PPA 获取新版 Python
-        if command -v sudo &> /dev/null; then
-            sudo apt-get update -y
-            sudo apt-get install -y software-properties-common
-            sudo add-apt-repository -y ppa:deadsnakes/ppa
-            sudo apt-get update -y
-            sudo apt-get install -y python3.11 python3.11-venv python3.11-distutils
-            # 设置 python3.11 为默认
-            sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
-        else
-            apt-get update -y
-            apt-get install -y software-properties-common
-            add-apt-repository -y ppa:deadsnakes/ppa
-            apt-get update -y
-            apt-get install -y python3.11 python3.11-venv python3.11-distutils
-            update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
-        fi
+prompt_yes_no() {
+    local prompt="$1"
+    local default="${2:-n}"
+    local response
+    if [ "$default" = "y" ]; then
+        read -p "$prompt [Y/n]: " response
+        response="${response:-y}"
     else
-        echo -e "${RED}❌ 无法自动升级 Python，请手动安装 Python >= 3.9${NC}"
-        exit 1
+        read -p "$prompt [y/N]: " response
+        response="${response:-n}"
     fi
-    
-    # 重新检查版本
-    PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
-    PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
-    
-    if [ "$PYTHON_MAJOR" -lt 3 ] || ([ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 9 ]); then
-        echo -e "${RED}❌ Python 升级失败，当前版本: $PYTHON_VERSION${NC}"
-        echo -e "${YELLOW}   请手动安装 Python >= 3.9 后重试${NC}"
-        exit 1
+    [[ "$response" =~ ^[Yy]$ ]]
+}
+
+detect_package_manager() {
+    if [ -f "pnpm-lock.yaml" ]; then
+        echo "pnpm"
+    elif [ -f "yarn.lock" ]; then
+        echo "yarn"
+    elif [ -f "package-lock.json" ]; then
+        echo "npm"
+    else
+        echo "npm"
     fi
-    echo -e "${GREEN}✓ Python 已升级到 $PYTHON_VERSION${NC}"
+}
+
+ensure_command() {
+    local cmd="$1"
+    local apt_pkg="$2"
+    local brew_pkg="$3"
+    if command -v "$cmd" &> /dev/null; then
+        return 0
+    fi
+    echo -e "${YELLOW}⚠️ 未检测到 $cmd${NC}"
+    if ! prompt_yes_no "是否尝试安装 $cmd?" "y"; then
+        return 1
+    fi
+    local os_manager
+    os_manager=$(detect_os)
+    if [ "$os_manager" = "apt" ] && [ -n "$apt_pkg" ]; then
+        install_with_apt "$apt_pkg"
+    elif [ "$os_manager" = "brew" ] && [ -n "$brew_pkg" ]; then
+        install_with_brew "$brew_pkg"
+    else
+        echo -e "${RED}❌ 无法自动安装 $cmd，请手动安装${NC}"
+        return 1
+    fi
+    command -v "$cmd" &> /dev/null
+}
+
+install_node_dependencies() {
+    local manager
+    manager=$(detect_package_manager)
+    case "$manager" in
+        pnpm)
+            if ensure_command "pnpm" "pnpm" "pnpm"; then
+                pnpm install
+            fi
+            ;;
+        yarn)
+            if ensure_command "yarn" "yarn" "yarn"; then
+                yarn install
+            fi
+            ;;
+        *)
+            npm install
+            ;;
+    esac
+}
+
+install_playwright() {
+    local manager
+    manager=$(detect_package_manager)
+    case "$manager" in
+        pnpm)
+            if ensure_command "pnpm" "pnpm" "pnpm"; then
+                pnpm add -D @playwright/test
+            fi
+            ;;
+        yarn)
+            if ensure_command "yarn" "yarn" "yarn"; then
+                yarn add -D @playwright/test
+            fi
+            ;;
+        *)
+            npm install -D @playwright/test
+            ;;
+    esac
+    npx playwright install
+}
+
+init_frontend_stack() {
+    local frontend_path="$1"
+    local choice="$2"
+
+    if [ -n "$frontend_path" ]; then
+        mkdir -p "$frontend_path"
+    fi
+
+    case "$choice" in
+        node)
+            (cd "$frontend_path" && init_node_stack)
+            ;;
+        ts)
+            (cd "$frontend_path" && init_typescript_stack)
+            ;;
+        custom)
+            (cd "$frontend_path" && init_custom_stack)
+            ;;
+        skip)
+            echo -e "${YELLOW}已跳过前端初始化${NC}"
+            ;;
+    esac
+}
+
+init_backend_fastapi() {
+    local backend_path="$1"
+    mkdir -p "$backend_path"
+    (cd "$backend_path" && {
+        init_python_stack "yes"
+        if [ ! -f "main.py" ]; then
+            cat << 'PY_EOF' > main.py
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {"status": "ok"}
+PY_EOF
+        fi
+        if prompt_yes_no "是否安装 FastAPI 依赖?" "y"; then
+            if [ ! -f "requirements.txt" ]; then
+                : > requirements.txt
+            fi
+            grep -q '^fastapi' requirements.txt 2>/dev/null || echo "fastapi" >> requirements.txt
+            grep -q '^uvicorn' requirements.txt 2>/dev/null || echo "uvicorn" >> requirements.txt
+            if [ -d ".venv" ]; then
+                ./.venv/bin/pip install -r requirements.txt
+            else
+                pip3 install -r requirements.txt
+            fi
+        fi
+    })
+}
+
+init_backend_flask() {
+    local backend_path="$1"
+    mkdir -p "$backend_path"
+    (cd "$backend_path" && {
+        init_python_stack "yes"
+        if [ ! -f "app.py" ]; then
+            cat << 'PY_EOF' > app.py
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.get("/")
+def index():
+    return {"status": "ok"}
+
+if __name__ == "__main__":
+    app.run(debug=True)
+PY_EOF
+        fi
+        if prompt_yes_no "是否安装 Flask 依赖?" "y"; then
+            if [ ! -f "requirements.txt" ]; then
+                : > requirements.txt
+            fi
+            grep -q '^flask' requirements.txt 2>/dev/null || echo "flask" >> requirements.txt
+            if [ -d ".venv" ]; then
+                ./.venv/bin/pip install -r requirements.txt
+            else
+                pip3 install -r requirements.txt
+            fi
+        fi
+    })
+}
+
+init_backend_django() {
+    local backend_path="$1"
+    mkdir -p "$backend_path"
+    (cd "$backend_path" && {
+        init_python_stack "yes"
+        if prompt_yes_no "是否安装 Django 并创建项目?" "y"; then
+            if [ ! -f "requirements.txt" ]; then
+                : > requirements.txt
+            fi
+            grep -q '^django' requirements.txt 2>/dev/null || echo "django" >> requirements.txt
+            if [ -d ".venv" ]; then
+                ./.venv/bin/pip install -r requirements.txt
+                read -p "请输入 Django 项目名: " DJANGO_PROJECT
+                if [ -n "$DJANGO_PROJECT" ]; then
+                    ./.venv/bin/django-admin startproject "$DJANGO_PROJECT" .
+                fi
+            else
+                pip3 install -r requirements.txt
+                read -p "请输入 Django 项目名: " DJANGO_PROJECT
+                if [ -n "$DJANGO_PROJECT" ]; then
+                    django-admin startproject "$DJANGO_PROJECT" .
+                fi
+            fi
+        fi
+    })
+}
+
+init_backend_express() {
+    local backend_path="$1"
+    mkdir -p "$backend_path"
+    (cd "$backend_path" && {
+        if [ ! -f "package.json" ]; then
+            npm init -y
+        fi
+        npm install express
+        if [ ! -f "server.js" ]; then
+            cat << 'JS_EOF' > server.js
+const express = require('express');
+const app = express();
+
+app.get('/', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Server running on ${port}`);
+});
+JS_EOF
+        fi
+    })
+}
+
+init_backend_nest() {
+    local backend_path="$1"
+    if ! ensure_command "npx" "npm" "node"; then
+        return 1
+    fi
+    if [ -d "$backend_path" ] && [ -n "$(ls -A "$backend_path" 2>/dev/null)" ]; then
+        echo -e "${YELLOW}⚠️ 后端目录非空，跳过 Nest 初始化${NC}"
+        return 0
+    fi
+    npx @nestjs/cli new "$backend_path"
+}
+
+init_backend_gin() {
+    local backend_path="$1"
+    mkdir -p "$backend_path"
+    (cd "$backend_path" && {
+        init_go_stack
+        if prompt_yes_no "是否安装 Gin 并生成示例?" "y"; then
+            go get github.com/gin-gonic/gin
+            if [ ! -f "main.go" ]; then
+                cat << 'GO_EOF' > main.go
+package main
+
+import "github.com/gin-gonic/gin"
+
+func main() {
+  r := gin.Default()
+  r.GET("/", func(c *gin.Context) {
+    c.JSON(200, gin.H{"status": "ok"})
+  })
+  r.Run()
+}
+GO_EOF
+            fi
+        fi
+    })
+}
+
+init_backend_rust_axum() {
+    local backend_path="$1"
+    mkdir -p "$backend_path"
+    (cd "$backend_path" && {
+        init_rust_stack
+        if prompt_yes_no "是否安装 Axum 并生成示例?" "y"; then
+            cargo add axum tokio --features tokio/full
+            if [ ! -f "src/main.rs" ]; then
+                cat << 'RS_EOF' > src/main.rs
+use axum::{routing::get, Json, Router};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() {
+    let app = Router::new().route("/", get(|| async { Json(json!({"status": "ok"})) }));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+RS_EOF
+            fi
+        fi
+    })
+}
+
+init_backend_stack() {
+    local backend_path="$1"
+    local choice="$2"
+
+    BACKEND_INITIALIZED=true
+    BACKEND_STACK="$choice"
+
+    case "$choice" in
+        fastapi) init_backend_fastapi "$backend_path" ;;
+        flask) init_backend_flask "$backend_path" ;;
+        django) init_backend_django "$backend_path" ;;
+        express) init_backend_express "$backend_path" ;;
+        nest) init_backend_nest "$backend_path" ;;
+        gin) init_backend_gin "$backend_path" ;;
+        axum) init_backend_rust_axum "$backend_path" ;;
+        custom) (cd "$backend_path" && init_custom_stack) ;;
+        skip) echo -e "${YELLOW}已跳过后端初始化${NC}" ;;
+    esac
+}
+
+install_typescript_deps() {
+    local manager
+    manager=$(detect_package_manager)
+    case "$manager" in
+        pnpm)
+            if ensure_command "pnpm" "pnpm" "pnpm"; then
+                pnpm add -D typescript ts-node @types/node
+            fi
+            ;;
+        yarn)
+            if ensure_command "yarn" "yarn" "yarn"; then
+                yarn add -D typescript ts-node @types/node
+            fi
+            ;;
+        *)
+            npm install -D typescript ts-node @types/node
+            ;;
+    esac
+    if [ ! -f "tsconfig.json" ]; then
+        npx tsc --init
+    fi
+}
+
+has_playwright_dep() {
+    if [ ! -f "package.json" ]; then
+        return 1
+    fi
+    jq -e '.dependencies["@playwright/test"] or .devDependencies["@playwright/test"]' package.json >/dev/null 2>&1
+}
+
+has_typescript_dep() {
+    if [ ! -f "package.json" ]; then
+        return 1
+    fi
+    jq -e '.dependencies["typescript"] or .devDependencies["typescript"]' package.json >/dev/null 2>&1
+}
+
+init_node_stack() {
+    if [ ! -f "package.json" ]; then
+        echo -e "${YELLOW}初始化 Node.js 项目...${NC}"
+        npm init -y
+    fi
+    install_playwright
+}
+
+init_typescript_stack() {
+    if [ ! -f "package.json" ]; then
+        echo -e "${YELLOW}初始化 TypeScript 项目...${NC}"
+        npm init -y
+    fi
+    install_typescript_deps
+    install_playwright
+}
+
+init_python_stack() {
+    local create_requirements="${1:-yes}"
+    if [ ! -f "pyproject.toml" ] && [ ! -f "requirements.txt" ]; then
+        echo -e "${YELLOW}初始化 Python 项目...${NC}"
+        if [ "$create_requirements" = "yes" ]; then
+            : > requirements.txt
+        fi
+    fi
+    if prompt_yes_no "是否创建 Python 虚拟环境 (.venv)?" "y"; then
+        python3 -m venv .venv
+    fi
+    if [ -f "requirements.txt" ] && prompt_yes_no "是否安装 Python 依赖 (pip install -r requirements.txt)?" "y"; then
+        if [ -d ".venv" ]; then
+            ./.venv/bin/pip install -r requirements.txt
+        else
+            if prompt_yes_no "检测到系统 Python 受管理(PEP 668)。是否使用 --break-system-packages 安装?" "n"; then
+                pip3 install --break-system-packages -r requirements.txt
+            else
+                echo -e "${YELLOW}⚠️ 已跳过系统级安装，请先创建 .venv 再安装依赖${NC}"
+            fi
+        fi
+    fi
+}
+
+init_go_stack() {
+    if ! ensure_command "go" "golang" "go"; then
+        return 1
+    fi
+    if [ ! -f "go.mod" ]; then
+        read -p "请输入 Go module 名称 (如 github.com/you/project): " GO_MODULE
+        if [ -n "$GO_MODULE" ]; then
+            go mod init "$GO_MODULE"
+        fi
+    fi
+}
+
+init_rust_stack() {
+    if ! ensure_command "cargo" "cargo" "rust"; then
+        return 1
+    fi
+    if [ ! -f "Cargo.toml" ]; then
+        cargo init
+    fi
+}
+
+init_custom_stack() {
+    read -p "请输入初始化命令 (将在项目目录执行): " CUSTOM_CMD
+    if [ -n "$CUSTOM_CMD" ]; then
+        eval "$CUSTOM_CMD"
+    fi
+}
+
+# ==========================================
+# Step 0.5: 根目录 Claude 初始化检查
+# ==========================================
+echo -e "\n${YELLOW}[Step 0.5] 检测根目录 Claude 初始化...${NC}"
+
+ROOT_CLAUDE_DIR="$TEMPLATE_DIR/.claude"
+ROOT_SETTINGS_FILE="$ROOT_CLAUDE_DIR/settings.json"
+ROOT_SETTINGS_LOCAL_FILE="$ROOT_CLAUDE_DIR/settings.local.json"
+ROOT_MCP_FILE="$TEMPLATE_DIR/.mcp.json"
+
+root_claude_initialized() {
+    if [ -f "$ROOT_MCP_FILE" ] && { [ -f "$ROOT_SETTINGS_FILE" ] || [ -f "$ROOT_SETTINGS_LOCAL_FILE" ]; }; then
+        return 0
+    fi
+    return 1
+}
+
+if root_claude_initialized; then
+        echo -e "${GREEN}✓ 根目录 Claude 已初始化${NC}"
 else
-    echo -e "${GREEN}✓ Python $PYTHON_VERSION${NC}"
+        echo -e "${YELLOW}⚠️ 根目录未检测到完整 Claude 初始化，开始初始化...${NC}"
+
+        if command -v claude &> /dev/null; then
+            INIT_OUTPUT=$(cd "$TEMPLATE_DIR" && claude init 2>&1) || {
+                echo -e "${RED}❌ claude init 失败:${NC}"
+                echo "$INIT_OUTPUT"
+                exit 1
+            }
+        fi
+
+        # 若 claude init 未生成配置，则创建最小可用配置以支持 planning.sh
+        if [ ! -f "$ROOT_SETTINGS_FILE" ]; then
+                mkdir -p "$ROOT_CLAUDE_DIR"
+                cat << 'EOF' > "$ROOT_SETTINGS_FILE"
+{
+    "permissions": {
+        "allow": [
+            "Read",
+            "Edit",
+            "Bash(ls:*)",
+            "Bash(cat:*)",
+            "Bash(grep:*)",
+            "Bash(find:*)",
+            "Bash(head:*)",
+            "Bash(tail:*)",
+            "Bash(wc:*)",
+            "Bash(echo:*)",
+            "Bash(pwd:*)",
+            "Bash(cd:*)",
+            "Bash(mkdir:*)",
+            "Bash(touch:*)",
+            "Bash(cp:*)",
+            "Bash(mv:*)",
+            "Bash(npm:*)",
+            "Bash(npx:*)",
+            "Bash(node:*)",
+            "Bash(python3:*)",
+            "Bash(python:*)",
+            "Bash(pip:*)",
+            "Bash(lsof:*)",
+            "Bash(ps:*)",
+            "Bash(kill:*)",
+            "Bash(which:*)",
+            "Bash(env:*)",
+            "Bash(export:*)",
+            "Bash(uvx:*)"
+        ],
+        "deny": [
+            "Bash(rm -rf:*)",
+            "Bash(rm -r:*)",
+            "Bash(sudo:*)",
+            "Bash(shutdown:*)",
+            "Bash(reboot:*)",
+            "Bash(mkfs:*)",
+            "Bash(dd:*)",
+            "Bash(chmod 777:*)",
+            "Bash(curl:*)|sh",
+            "Bash(wget:*)|sh",
+            "Read(/etc/passwd)",
+            "Read(/etc/shadow)",
+            "Read(./.env)",
+            "Read(./.env.*)"
+        ],
+        "ask": [
+            "Bash(git push:*)",
+            "Bash(git commit:*)",
+            "Bash(npm publish:*)",
+            "Bash(rm:*)"
+        ]
+    }
+}
+EOF
+        fi
+
+        if [ ! -f "$ROOT_MCP_FILE" ]; then
+                cat << 'EOF' > "$ROOT_MCP_FILE"
+{
+    "mcpServers": {
+        "superpowers": {
+            "command": "npx",
+            "args": ["-y", "@anthropic-ai/superpower"]
+        }
+    }
+}
+EOF
+        fi
+
+        if [ -f "$ROOT_SETTINGS_FILE" ] && [ -f "$ROOT_MCP_FILE" ]; then
+            echo -e "${GREEN}✓ 根目录 Claude 初始化完成${NC}"
+        else
+            echo -e "${RED}❌ 根目录 Claude 初始化失败，请手动执行: claude init${NC}"
+            exit 1
+        fi
 fi
 
 # ==========================================
-# 1. 创建目录结构
+# Step 1: 检测并下载 ralph-claude-code
 # ==========================================
-echo -e "\n${YELLOW}[Step 1] 创建目录结构...${NC}"
+echo -e "\n${YELLOW}[Step 1] 检测 ralph-claude-code 模板...${NC}"
 
-mkdir -p .claude/hooks
-mkdir -p scripts
-mkdir -p specs
-mkdir -p tests/e2e
+RALPH_REPO_DIR="$TEMPLATE_DIR/ralph-claude-code"
+
+if [ -d "$RALPH_REPO_DIR" ]; then
+    echo -e "${GREEN}✓ ralph-claude-code 已存在${NC}"
+    echo -e "  路径: $RALPH_REPO_DIR"
+    
+    # 询问是否更新
+    echo ""
+    read -p "是否更新到最新版本? [y/N]: " UPDATE_RALPH
+    if [[ "$UPDATE_RALPH" =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}更新 ralph-claude-code...${NC}"
+        cd "$RALPH_REPO_DIR"
+        git pull origin main || git pull origin master || true
+        cd "$TEMPLATE_DIR"
+        echo -e "${GREEN}✓ 更新完成${NC}"
+    fi
+else
+    echo -e "${YELLOW}下载 ralph-claude-code...${NC}"
+    git clone https://github.com/frankbria/ralph-claude-code.git "$RALPH_REPO_DIR"
+    echo -e "${GREEN}✓ 下载完成${NC}"
+fi
+
+# ==========================================
+# Step 2: 检测并安装 Superpowers
+# ==========================================
+echo -e "\n${YELLOW}[Step 2] 检测 Superpowers 插件...${NC}"
+
+check_superpowers() {
+    # 检查新版本地配置
+    if [ -f "$HOME/.claude.json" ]; then
+        if grep -q "superpower" "$HOME/.claude.json" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # 检查全局 MCP 配置
+    if [ -f "$HOME/.claude/mcp.json" ]; then
+        if grep -q "superpower" "$HOME/.claude/mcp.json" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    
+    # 检查 claude settings
+    if [ -f "$HOME/.claude/settings.json" ]; then
+        if grep -q "superpower" "$HOME/.claude/settings.json" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+if check_superpowers; then
+    echo -e "${GREEN}✓ Superpowers 已安装${NC}"
+else
+    echo -e "${YELLOW}⚠️ Superpowers 未检测到，自动安装...${NC}"
+    
+    # 使用 claude mcp add 命令（官方推荐方式）
+    if command -v claude &> /dev/null; then
+        claude mcp add superpowers -- npx -y @anthropic-ai/superpower 2>/dev/null || {
+            echo -e "${YELLOW}  使用备用方式安装...${NC}"
+            
+            # 确保目录存在
+            mkdir -p "$HOME/.claude"
+            
+                        # 创建或更新 mcp.json
+            if [ -f "$HOME/.claude/mcp.json" ]; then
+                # 使用 jq 添加
+                jq '.mcpServers.superpowers = {"command": "npx", "args": ["-y", "@anthropic-ai/superpower"]}' \
+                    "$HOME/.claude/mcp.json" > "$HOME/.claude/mcp.json.tmp" && \
+                    mv "$HOME/.claude/mcp.json.tmp" "$HOME/.claude/mcp.json"
+            else
+                cat << 'EOF' > "$HOME/.claude/mcp.json"
+{
+  "mcpServers": {
+    "superpowers": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/superpower"]
+    }
+  }
+}
+EOF
+            fi
+        }
+        echo -e "${GREEN}✓ Superpowers 安装成功${NC}"
+    else
+        echo -e "${RED}❌ Claude CLI 不可用，无法安装 Superpowers${NC}"
+    fi
+fi
+
+# ==========================================
+# Step 3: 询问项目类型 (新项目 / 已有项目)
+# ==========================================
+echo -e "\n${YELLOW}[Step 3] 项目配置...${NC}"
+
+echo ""
+echo -e "${BLUE}请选择项目类型:${NC}"
+echo -e "  1) 新项目 - 创建一个全新的项目"
+echo -e "  2) 已有项目 - 从 Git 仓库 clone"
+echo -e "  3) 本地项目 - 选择已有本地目录"
+echo ""
+read -p "请输入选项 [1-3] (默认: 1): " PROJECT_TYPE
+
+case "$PROJECT_TYPE" in
+    2)
+        # 已有项目 - clone
+        echo ""
+        echo -e "${CYAN}请输入 Git 仓库地址:${NC}"
+        read -p "Git URL: " GIT_URL
+        
+        if [ -z "$GIT_URL" ]; then
+            echo -e "${RED}❌ Git URL 不能为空${NC}"
+            exit 1
+        fi
+        
+        echo ""
+        read -p "请输入分支名 (默认: main): " GIT_BRANCH
+        GIT_BRANCH="${GIT_BRANCH:-main}"
+        
+        # 从 URL 提取项目名
+        PROJECT_NAME=$(basename "$GIT_URL" .git)
+        echo ""
+        read -p "项目文件夹名 (默认: $PROJECT_NAME): " CUSTOM_NAME
+        PROJECT_NAME="${CUSTOM_NAME:-$PROJECT_NAME}"
+        
+        PROJECT_DIR="$TEMPLATE_DIR/$PROJECT_NAME"
+        
+        if [ -d "$PROJECT_DIR" ]; then
+            echo -e "${YELLOW}⚠️ 目录已存在: $PROJECT_DIR${NC}"
+            read -p "是否覆盖? [y/N]: " OVERWRITE
+            if [[ "$OVERWRITE" =~ ^[Yy]$ ]]; then
+                rm -rf "$PROJECT_DIR"
+            else
+                echo -e "${RED}❌ 操作取消${NC}"
+                exit 1
+            fi
+        fi
+        
+        echo -e "${YELLOW}克隆项目...${NC}"
+        git clone -b "$GIT_BRANCH" "$GIT_URL" "$PROJECT_DIR"
+        echo -e "${GREEN}✓ 项目克隆成功${NC}"
+        ;;
+    3)
+        echo ""
+        echo -e "${CYAN}请输入本地项目路径:${NC}"
+        read -p "项目路径: " LOCAL_PROJECT_PATH
+
+        if [ -z "$LOCAL_PROJECT_PATH" ]; then
+            echo -e "${RED}❌ 项目路径不能为空${NC}"
+            exit 1
+        fi
+
+        if [ ! -d "$LOCAL_PROJECT_PATH" ]; then
+            echo -e "${RED}❌ 本地目录不存在: $LOCAL_PROJECT_PATH${NC}"
+            exit 1
+        fi
+
+        PROJECT_DIR="$(cd "$LOCAL_PROJECT_PATH" && pwd)"
+        PROJECT_NAME="$(basename "$PROJECT_DIR")"
+        echo -e "${GREEN}✓ 使用本地项目目录: $PROJECT_DIR${NC}"
+        ;;
+    *)
+        # 新项目
+        echo ""
+        echo -e "${CYAN}请输入项目名称:${NC}"
+        read -p "项目名: " PROJECT_NAME
+        
+        if [ -z "$PROJECT_NAME" ]; then
+            echo -e "${RED}❌ 项目名不能为空${NC}"
+            exit 1
+        fi
+        
+        # 替换空格为下划线
+        PROJECT_NAME=$(echo "$PROJECT_NAME" | tr ' ' '_')
+        PROJECT_DIR="$TEMPLATE_DIR/$PROJECT_NAME"
+        
+        if [ -d "$PROJECT_DIR" ]; then
+            echo -e "${YELLOW}⚠️ 目录已存在: $PROJECT_DIR${NC}"
+            read -p "是否覆盖? [y/N]: " OVERWRITE
+            if [[ "$OVERWRITE" =~ ^[Yy]$ ]]; then
+                rm -rf "$PROJECT_DIR"
+            else
+                echo -e "${RED}❌ 操作取消${NC}"
+                exit 1
+            fi
+        fi
+        
+        mkdir -p "$PROJECT_DIR"
+        echo -e "${GREEN}✓ 创建项目目录: $PROJECT_DIR${NC}"
+        ;;
+esac
+
+# ==========================================
+# Step 4: 进入项目目录，配置项目结构
+# ==========================================
+echo -e "\n${YELLOW}[Step 4] 项目结构配置...${NC}"
+
+cd "$PROJECT_DIR"
+echo -e "  工作目录: ${BLUE}$PROJECT_DIR${NC}"
+
+echo ""
+echo -e "${BLUE}请选择你的项目结构:${NC}"
+echo -e "  1) 单体项目 (所有代码在根目录)"
+echo -e "  2) Monorepo - 前端在 frontend/"
+echo -e "  3) Monorepo - 前端在 client/"
+echo -e "  4) Monorepo - 前端在 web/"
+echo -e "  5) 自定义前端目录"
+echo ""
+read -p "请输入选项 [1-5] (默认: 1): " PROJECT_STRUCTURE
+
+case "$PROJECT_STRUCTURE" in
+    2)
+        FRONTEND_DIR="frontend"
+        ;;
+    3)
+        FRONTEND_DIR="client"
+        ;;
+    4)
+        FRONTEND_DIR="web"
+        ;;
+    5)
+        read -p "请输入前端目录名称: " CUSTOM_DIR
+        FRONTEND_DIR="${CUSTOM_DIR:-frontend}"
+        ;;
+    *)
+        FRONTEND_DIR=""
+        ;;
+esac
+
+# 设置文件路径
+if [ -n "$FRONTEND_DIR" ]; then
+    PLAYWRIGHT_CONFIG_DIR="$FRONTEND_DIR"
+    TESTS_DIR="$FRONTEND_DIR/tests/e2e"
+    echo -e "${GREEN}✓ Monorepo 模式: 前端目录 = $FRONTEND_DIR${NC}"
+else
+    PLAYWRIGHT_CONFIG_DIR="."
+    TESTS_DIR="tests/e2e"
+    echo -e "${GREEN}✓ 单体项目模式${NC}"
+fi
+
+echo ""
+echo -e "${BLUE}请选择默认端口:${NC}"
+echo -e "  1) 3000 (Next.js / Express / 通用)"
+echo -e "  2) 5173 (Vite)"
+echo -e "  3) 8080 (Vue CLI / 通用)"
+echo -e "  4) 4200 (Angular)"
+echo -e "  5) 自定义端口"
+echo ""
+read -p "请输入选项 [1-5] (默认: 1): " PORT_CHOICE
+
+case "$PORT_CHOICE" in
+    2)
+        DEFAULT_PORT="5173"
+        ;;
+    3)
+        DEFAULT_PORT="8080"
+        ;;
+    4)
+        DEFAULT_PORT="4200"
+        ;;
+    5)
+        read -p "请输入端口号: " CUSTOM_PORT
+        DEFAULT_PORT="${CUSTOM_PORT:-3000}"
+        ;;
+    *)
+        DEFAULT_PORT="3000"
+        ;;
+esac
+
+echo -e "${GREEN}✓ 默认端口: $DEFAULT_PORT${NC}"
+
+# ==========================================
+# Step 5: 技术栈初始化
+# ==========================================
+echo -e "\n${YELLOW}[Step 5] 技术栈初始化...${NC}"
+
+FRONTEND_PATH="$PROJECT_DIR"
+if [ -n "$FRONTEND_DIR" ]; then
+    FRONTEND_PATH="$PROJECT_DIR/$FRONTEND_DIR"
+    mkdir -p "$FRONTEND_PATH"
+fi
+
+BACKEND_DIR=""
+BACKEND_REQUESTED=false
+BACKEND_INITIALIZED=false
+BACKEND_STACK=""
+if prompt_yes_no "是否有后端?" "n"; then
+    BACKEND_REQUESTED=true
+    read -p "后端目录名 (默认: backend): " BACKEND_DIR_INPUT
+    BACKEND_DIR="${BACKEND_DIR_INPUT:-backend}"
+fi
+
+HAS_BACKEND=false
+BACKEND_PATH=""
+if [ -n "$BACKEND_DIR" ]; then
+    BACKEND_PATH="$PROJECT_DIR/$BACKEND_DIR"
+    if [ -d "$BACKEND_PATH" ]; then
+        HAS_BACKEND=true
+    fi
+fi
+
+if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
+    HAS_STACK=false
+
+    if [ -f "$FRONTEND_PATH/package.json" ]; then
+        HAS_STACK=true
+        echo -e "${GREEN}✓ 检测到 Node.js 项目${NC}"
+        (cd "$FRONTEND_PATH" && {
+            if prompt_yes_no "是否安装前端依赖?" "y"; then
+                install_node_dependencies
+            fi
+
+            if [ -f "tsconfig.json" ] || has_typescript_dep; then
+                echo -e "${GREEN}✓ 检测到 TypeScript 配置${NC}"
+                if ! has_typescript_dep; then
+                    if prompt_yes_no "未检测到 typescript 依赖，是否安装?" "y"; then
+                        install_typescript_deps
+                    fi
+                fi
+            else
+                if prompt_yes_no "是否为 TypeScript 项目?" "n"; then
+                    install_typescript_deps
+                fi
+            fi
+
+            if has_playwright_dep; then
+                if prompt_yes_no "是否安装 Playwright 浏览器?" "y"; then
+                    npx playwright install
+                fi
+            else
+                if prompt_yes_no "未检测到 @playwright/test，是否安装?" "y"; then
+                    install_playwright
+                fi
+            fi
+        })
+    fi
+
+    if [ -n "$BACKEND_PATH" ] && [ -d "$BACKEND_PATH" ]; then
+        if [ -f "$BACKEND_PATH/pyproject.toml" ] || [ -f "$BACKEND_PATH/requirements.txt" ]; then
+            HAS_STACK=true
+            echo -e "${GREEN}✓ 检测到 Python 后端${NC}"
+            (cd "$BACKEND_PATH" && init_python_stack "no")
+        fi
+
+        if [ -f "$BACKEND_PATH/go.mod" ]; then
+            HAS_STACK=true
+            echo -e "${GREEN}✓ 检测到 Go 后端${NC}"
+            (cd "$BACKEND_PATH" && init_go_stack)
+        fi
+
+        if [ -f "$BACKEND_PATH/Cargo.toml" ]; then
+            HAS_STACK=true
+            echo -e "${GREEN}✓ 检测到 Rust 后端${NC}"
+            (cd "$BACKEND_PATH" && init_rust_stack)
+        fi
+    else
+        if [ -f "pyproject.toml" ] || [ -f "requirements.txt" ]; then
+            HAS_STACK=true
+            echo -e "${GREEN}✓ 检测到 Python 项目${NC}"
+            init_python_stack "no"
+        fi
+
+        if [ -f "go.mod" ]; then
+            HAS_STACK=true
+            echo -e "${GREEN}✓ 检测到 Go 项目${NC}"
+            init_go_stack
+        fi
+
+        if [ -f "Cargo.toml" ]; then
+            HAS_STACK=true
+            echo -e "${GREEN}✓ 检测到 Rust 项目${NC}"
+            init_rust_stack
+        fi
+    fi
+
+    if [ "$HAS_STACK" = false ]; then
+        echo -e "${YELLOW}⚠️ 未检测到已知技术栈${NC}"
+        echo -e "${BLUE}请选择要初始化的技术栈:${NC}"
+        echo -e "  1) Node.js (JavaScript)"
+        echo -e "  2) TypeScript"
+        echo -e "  3) Python"
+        echo -e "  4) Go"
+        echo -e "  5) Rust"
+        echo -e "  6) 自定义命令"
+        echo -e "  7) 跳过"
+        while true; do
+            read -p "请输入选项 [1-7]: " STACK_CHOICE
+            case "$STACK_CHOICE" in
+                1) init_node_stack; break ;;
+                2) init_typescript_stack; break ;;
+                3) init_python_stack; break ;;
+                4) init_go_stack; break ;;
+                5) init_rust_stack; break ;;
+                6) init_custom_stack; break ;;
+                7) echo -e "${YELLOW}已跳过技术栈初始化${NC}"; break ;;
+                *) echo -e "${YELLOW}请输入 1-7 的有效选项${NC}" ;;
+            esac
+        done
+    fi
+
+    if [ "$HAS_BACKEND" = true ]; then
+        if [ -f "$BACKEND_PATH/pyproject.toml" ] || [ -f "$BACKEND_PATH/requirements.txt" ]; then
+            echo -e "${GREEN}✓ 检测到 Python 后端${NC}"
+            (cd "$BACKEND_PATH" && init_python_stack "no")
+        elif [ -f "$BACKEND_PATH/package.json" ]; then
+            echo -e "${GREEN}✓ 检测到 Node.js 后端${NC}"
+            if prompt_yes_no "是否安装后端依赖?" "y"; then
+                (cd "$BACKEND_PATH" && install_node_dependencies)
+            fi
+        elif [ -f "$BACKEND_PATH/go.mod" ]; then
+            echo -e "${GREEN}✓ 检测到 Go 后端${NC}"
+            (cd "$BACKEND_PATH" && init_go_stack)
+        elif [ -f "$BACKEND_PATH/Cargo.toml" ]; then
+            echo -e "${GREEN}✓ 检测到 Rust 后端${NC}"
+            (cd "$BACKEND_PATH" && init_rust_stack)
+        else
+            if prompt_yes_no "未检测到后端配置，是否初始化后端?" "n"; then
+                echo -e "${BLUE}请选择后端技术栈:${NC}"
+                echo -e "  1) FastAPI"
+                echo -e "  2) Flask"
+                echo -e "  3) Django"
+                echo -e "  4) Express"
+                echo -e "  5) NestJS"
+                echo -e "  6) Go (Gin)"
+                echo -e "  7) Rust (Axum)"
+                echo -e "  8) 自定义命令"
+                echo -e "  9) 跳过"
+                while true; do
+                    read -p "请输入选项 [1-9]: " BACKEND_CHOICE
+                    case "$BACKEND_CHOICE" in
+                        1) init_backend_stack "$BACKEND_PATH" fastapi; break ;;
+                        2) init_backend_stack "$BACKEND_PATH" flask; break ;;
+                        3) init_backend_stack "$BACKEND_PATH" django; break ;;
+                        4) init_backend_stack "$BACKEND_PATH" express; break ;;
+                        5) init_backend_stack "$BACKEND_PATH" nest; break ;;
+                        6) init_backend_stack "$BACKEND_PATH" gin; break ;;
+                        7) init_backend_stack "$BACKEND_PATH" axum; break ;;
+                        8) init_backend_stack "$BACKEND_PATH" custom; break ;;
+                        9) echo -e "${YELLOW}已跳过后端初始化${NC}"; break ;;
+                        *) echo -e "${YELLOW}请输入 1-9 的有效选项${NC}" ;;
+                    esac
+                done
+            fi
+        fi
+    elif [ "$BACKEND_REQUESTED" = true ]; then
+        if prompt_yes_no "是否需要初始化后端?" "n"; then
+            echo -e "${BLUE}请选择后端技术栈:${NC}"
+            echo -e "  1) FastAPI"
+            echo -e "  2) Flask"
+            echo -e "  3) Django"
+            echo -e "  4) Express"
+            echo -e "  5) NestJS"
+            echo -e "  6) Go (Gin)"
+            echo -e "  7) Rust (Axum)"
+            echo -e "  8) 自定义命令"
+            echo -e "  9) 跳过"
+            while true; do
+                read -p "请输入选项 [1-9]: " BACKEND_CHOICE
+                case "$BACKEND_CHOICE" in
+                    1) init_backend_stack "$BACKEND_PATH" fastapi; break ;;
+                    2) init_backend_stack "$BACKEND_PATH" flask; break ;;
+                    3) init_backend_stack "$BACKEND_PATH" django; break ;;
+                    4) init_backend_stack "$BACKEND_PATH" express; break ;;
+                    5) init_backend_stack "$BACKEND_PATH" nest; break ;;
+                    6) init_backend_stack "$BACKEND_PATH" gin; break ;;
+                    7) init_backend_stack "$BACKEND_PATH" axum; break ;;
+                    8) init_backend_stack "$BACKEND_PATH" custom; break ;;
+                    9) echo -e "${YELLOW}已跳过后端初始化${NC}"; break ;;
+                    *) echo -e "${YELLOW}请输入 1-9 的有效选项${NC}" ;;
+                esac
+            done
+        fi
+    fi
+else
+    echo -e "${BLUE}请选择前端技术栈:${NC}"
+    echo -e "  1) Node.js (JavaScript)"
+    echo -e "  2) TypeScript"
+    echo -e "  3) 自定义命令"
+    echo -e "  4) 跳过前端"
+    while true; do
+        read -p "请输入选项 [1-4]: " FRONT_CHOICE
+        case "$FRONT_CHOICE" in
+            1) init_frontend_stack "$FRONTEND_PATH" node; break ;;
+            2) init_frontend_stack "$FRONTEND_PATH" ts; break ;;
+            3) init_frontend_stack "$FRONTEND_PATH" custom; break ;;
+            4) init_frontend_stack "$FRONTEND_PATH" skip; break ;;
+            *) echo -e "${YELLOW}请输入 1-4 的有效选项${NC}" ;;
+        esac
+    done
+
+    if prompt_yes_no "是否需要初始化后端?" "n"; then
+        echo -e "${BLUE}请选择后端技术栈:${NC}"
+        echo -e "  1) FastAPI"
+        echo -e "  2) Flask"
+        echo -e "  3) Django"
+        echo -e "  4) Express"
+        echo -e "  5) NestJS"
+        echo -e "  6) Go (Gin)"
+        echo -e "  7) Rust (Axum)"
+        echo -e "  8) 自定义命令"
+        echo -e "  9) 跳过"
+        while true; do
+            read -p "请输入选项 [1-9]: " BACKEND_CHOICE
+            case "$BACKEND_CHOICE" in
+                1) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" fastapi; break ;;
+                2) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" flask; break ;;
+                3) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" django; break ;;
+                4) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" express; break ;;
+                5) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" nest; break ;;
+                6) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" gin; break ;;
+                7) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" axum; break ;;
+                8) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" custom; break ;;
+                9) echo -e "${YELLOW}已跳过后端初始化${NC}"; break ;;
+                *) echo -e "${YELLOW}请输入 1-9 的有效选项${NC}" ;;
+            esac
+        done
+    fi
+
+fi
+
+# ==========================================
+# Step 6: 创建目录结构
+# ==========================================
+echo -e "\n${YELLOW}[Step 6] 创建目录结构...${NC}"
+
+mkdir -p "$TESTS_DIR"
 mkdir -p logs
-mkdir -p .ralph  # 新增: Ralph 状态目录
+mkdir -p docs
+
+if [ -n "$FRONTEND_DIR" ]; then
+    mkdir -p "$FRONTEND_DIR"
+fi
 
 echo -e "${GREEN}✓ 目录结构已创建${NC}"
 
 # ==========================================
-# 2. 创建 .mcp.json (修复: 加回 Browser-use)
+# Step 7: 创建 .mcp.json
 # ==========================================
-echo -e "\n${YELLOW}[Step 2] 创建 .mcp.json (含 Browser-use)...${NC}"
+echo -e "\n${YELLOW}[Step 7] 创建 .mcp.json...${NC}"
 
-# 备份现有配置
 if [ -f ".mcp.json" ]; then
     cp .mcp.json .mcp.json.backup.$(date +%Y%m%d_%H%M%S)
     echo -e "${YELLOW}  已备份现有 .mcp.json${NC}"
@@ -289,939 +1279,24 @@ cat << 'EOF' > .mcp.json
     "browser-use": {
       "command": "uvx",
       "args": ["browser-use-mcp"]
+    },
+    "superpowers": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/superpower"]
     }
   }
 }
 EOF
 
-echo -e "${GREEN}✓ .mcp.json (Playwright + Browser-use)${NC}"
+echo -e "${GREEN}✓ .mcp.json${NC}"
 
 # ==========================================
-# 3. 创建 .claude/settings.json
+# Step 8: 创建示例测试和配置
 # ==========================================
-echo -e "\n${YELLOW}[Step 3] 创建 .claude/settings.json...${NC}"
-
-# 备份现有配置
-if [ -f ".claude/settings.json" ]; then
-    cp .claude/settings.json .claude/settings.json.backup.$(date +%Y%m%d_%H%M%S)
-    echo -e "${YELLOW}  已备份现有 .claude/settings.json${NC}"
-fi
-
-cat << 'EOF' > .claude/settings.json
-{
-  "permissions": {
-    "allow": [
-      "Read",
-      "Edit",
-      "Bash(ls:*)",
-      "Bash(cat:*)",
-      "Bash(grep:*)",
-      "Bash(find:*)",
-      "Bash(head:*)",
-      "Bash(tail:*)",
-      "Bash(wc:*)",
-      "Bash(echo:*)",
-      "Bash(pwd:*)",
-      "Bash(cd:*)",
-      "Bash(mkdir:*)",
-      "Bash(touch:*)",
-      "Bash(cp:*)",
-      "Bash(mv:*)",
-      "Bash(npm:*)",
-      "Bash(npx:*)",
-      "Bash(node:*)",
-      "Bash(python3:*)",
-      "Bash(python:*)",
-      "Bash(pip:*)",
-      "Bash(lsof:*)",
-      "Bash(ps:*)",
-      "Bash(kill:*)",
-      "Bash(which:*)",
-      "Bash(env:*)",
-      "Bash(export:*)",
-      "Bash(uvx:*)"
-    ],
-    "deny": [
-      "Bash(rm -rf:*)",
-      "Bash(rm -r:*)",
-      "Bash(sudo:*)",
-      "Bash(shutdown:*)",
-      "Bash(reboot:*)",
-      "Bash(mkfs:*)",
-      "Bash(dd:*)",
-      "Bash(chmod 777:*)",
-      "Bash(chmod -R 777:*)",
-      "Bash(chown -R:*)",
-      "Bash(curl:*)|sh",
-      "Bash(curl:*)|bash",
-      "Bash(wget:*)|sh",
-      "Bash(wget:*)|bash",
-      "Bash(eval:*)",
-      "Read(/etc/passwd)",
-      "Read(/etc/shadow)",
-      "Read(./.env)",
-      "Read(./.env.*)",
-      "Read(./secrets/**)",
-      "Read(./.git/config)"
-    ],
-    "ask": [
-      "Bash(git push:*)",
-      "Bash(git commit:*)",
-      "Bash(npm publish:*)",
-      "Bash(rm:*)"
-    ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tool_use.py\""
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop_hook.py\""
-          }
-        ]
-      }
-    ]
-  }
-}
-EOF
-
-echo -e "${GREEN}✓ .claude/settings.json${NC}"
-
-# ==========================================
-# 4. Hook: PreToolUse (安全拦截)
-# ==========================================
-echo -e "\n${YELLOW}[Step 4] 创建 PreToolUse Hook...${NC}"
-
-cat << 'PYTHON_EOF' > .claude/hooks/pre_tool_use.py
-#!/usr/bin/env python3
-"""
-PreToolUse Hook - 在工具执行前进行安全检查
-"""
-
-import sys
-import json
-import re
-import os
-
-DANGEROUS_PATTERNS = [
-    (r"rm\s+-[rR]*f\s+/", "禁止删除根目录"),
-    (r"rm\s+-[rR]*f\s+~", "禁止删除用户目录"),
-    (r"rm\s+-[rR]*f\s+\*", "禁止通配符强制删除"),
-    (r">\s*/dev/sd[a-z]", "禁止写入磁盘设备"),
-    (r"mkfs\.", "禁止格式化磁盘"),
-    (r"dd\s+if=.*of=/dev", "禁止 dd 写入设备"),
-    (r"chmod\s+-R\s+777\s+/", "禁止递归 777 根目录"),
-    (r"curl\s+.*\|\s*sudo", "禁止 curl 管道到 sudo"),
-    (r"wget\s+.*\|\s*sh", "禁止 wget 管道到 sh"),
-    (r"curl\s+.*\|\s*sh", "禁止 curl 管道到 sh"),
-    (r":\(\)\{\s*:\|:&\s*\};:", "禁止 fork bomb"),
-]
-
-LOG_FILE = os.path.join(
-    os.environ.get("CLAUDE_PROJECT_DIR", "."),
-    "logs", "pre_tool_use.log"
-)
-
-def log(message: str):
-    try:
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        with open(LOG_FILE, "a") as f:
-            f.write(f"{message}\n")
-    except:
-        pass
-
-def block(reason: str):
-    output = {"decision": "block", "reason": reason}
-    print(json.dumps(output))
-    sys.exit(0)
-
-def allow():
-    sys.exit(0)
-
-def main():
-    try:
-        input_str = sys.stdin.read()
-        if not input_str.strip():
-            allow()
-        
-        payload = json.loads(input_str)
-        tool_name = payload.get("tool_name", "")
-        tool_input = payload.get("tool_input", {}) or {}
-        
-        log(f"[PreToolUse] tool={tool_name}, input={json.dumps(tool_input)[:200]}")
-        
-        if tool_name != "Bash":
-            allow()
-        
-        command = tool_input.get("command", "")
-        if not command:
-            allow()
-        
-        for pattern, reason in DANGEROUS_PATTERNS:
-            if re.search(pattern, command, re.IGNORECASE):
-                log(f"[BLOCKED] pattern={pattern}, command={command[:100]}")
-                block(f"{reason}: 命令包含危险模式 '{pattern}'")
-        
-        allow()
-        
-    except Exception as e:
-        log(f"[ERROR] {e}")
-        allow()
-
-if __name__ == "__main__":
-    main()
-PYTHON_EOF
-
-chmod +x .claude/hooks/pre_tool_use.py
-echo -e "${GREEN}✓ .claude/hooks/pre_tool_use.py${NC}"
-
-# ==========================================
-# 5. Hook: Stop (修复: 只检查最后一条 assistant 消息)
-# ==========================================
-echo -e "\n${YELLOW}[Step 5] 创建 Stop Hook (修复版)...${NC}"
-
-cat << 'PYTHON_EOF' > .claude/hooks/stop_hook.py
-#!/usr/bin/env python3
-"""
-Stop Hook V7.1 - 修复版
-
-修复内容:
-1. 只检查最后一条 assistant 消息，避免历史消息误触发
-2. Gate 失败信息落盘到 .ralph/last_failure.md
-3. 更精确的 Token 匹配（必须单独一行）
-"""
-
-import sys
-import json
-import subprocess
-import os
-import re
-from datetime import datetime
-
-# 退出 Token (必须单独一行才算数)
-EXIT_TOKEN = "__RALPH_QUALITY_GATE_EXIT_REQUEST_7f3a9b2c__"
-
-# 文件路径
-PROJECT_DIR = os.environ.get("CLAUDE_PROJECT_DIR", ".")
-QUALITY_GATE_SCRIPT = os.path.join(PROJECT_DIR, "scripts/quality_gate.sh")
-LOG_FILE = os.path.join(PROJECT_DIR, "logs/stop_hook.log")
-FAILURE_FILE = os.path.join(PROJECT_DIR, ".ralph/last_failure.md")  # 新增: 失败信息落盘
-
-
-def log(message: str):
-    try:
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        timestamp = datetime.now().isoformat()
-        with open(LOG_FILE, "a") as f:
-            f.write(f"[{timestamp}] {message}\n")
-    except:
-        pass
-
-
-def save_failure(reason: str, details: str):
-    """
-    保存失败信息到文件，让 Claude 下次能读取
-    解决"从头开始"无记忆的问题
-    """
-    try:
-        os.makedirs(os.path.dirname(FAILURE_FILE), exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        content = f"""# 上次 Quality Gate 失败记录
-
-**时间**: {timestamp}
-
-## 失败原因
-{reason}
-
-## 详细信息
-```
-{details[-2000:] if len(details) > 2000 else details}
-```
-
-## 下一步
-请根据上述错误信息修复问题，然后重新运行测试。
-"""
-        with open(FAILURE_FILE, "w") as f:
-            f.write(content)
-        log(f"[INFO] Failure saved to {FAILURE_FILE}")
-    except Exception as e:
-        log(f"[ERROR] Failed to save failure: {e}")
-
-
-def clear_failure():
-    """清除失败记录"""
-    try:
-        if os.path.exists(FAILURE_FILE):
-            os.remove(FAILURE_FILE)
-    except:
-        pass
-
-
-def block_exit(reason: str):
-    output = {"decision": "block", "reason": reason}
-    print(json.dumps(output))
-    log(f"[BLOCKED] {reason[:200]}")
-    sys.exit(0)
-
-
-def allow_exit():
-    log("[ALLOWED] Exit permitted")
-    clear_failure()  # 成功时清除失败记录
-    sys.exit(0)
-
-
-def extract_last_assistant_message(transcript_path: str) -> str:
-    """
-    从 transcript 中提取最后一条 assistant 消息
-    
-    支持两种格式:
-    1. JSONL: 每行一个 JSON 对象
-    2. 单个 JSON 数组
-    
-    只返回最后一条 assistant 的内容，避免历史消息误触发
-    """
-    try:
-        with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-        
-        # 尝试解析为 JSONL
-        lines = content.strip().split('\n')
-        messages = []
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                messages.append(entry)
-            except:
-                continue
-        
-        # 如果 JSONL 解析失败，尝试整体 JSON
-        if not messages:
-            try:
-                data = json.loads(content)
-                if isinstance(data, list):
-                    messages = data
-                elif isinstance(data, dict) and "messages" in data:
-                    messages = data["messages"]
-            except:
-                pass
-        
-        # 倒序查找最后一条 assistant 消息
-        for entry in reversed(messages):
-            role = entry.get("role") or entry.get("type") or ""
-            if role.lower() == "assistant":
-                content_raw = entry.get("content", "")
-                
-                # content 可能是字符串或数组
-                if isinstance(content_raw, str):
-                    return content_raw
-                elif isinstance(content_raw, list):
-                    text_parts = []
-                    for block in content_raw:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif isinstance(block, str):
-                            text_parts.append(block)
-                    return "\n".join(text_parts)
-        
-        return ""
-        
-    except Exception as e:
-        log(f"[WARNING] Failed to extract assistant message: {e}")
-        return ""
-
-
-def check_token_in_message(message: str) -> bool:
-    """
-    检查 Token 是否单独成行
-    
-    有效: 
-      ...测试通过\n__RALPH_QUALITY_GATE_EXIT_REQUEST_7f3a9b2c__\n
-      __RALPH_QUALITY_GATE_EXIT_REQUEST_7f3a9b2c__
-    
-    无效 (引用/讨论):
-      我现在不能输出 `__RALPH_QUALITY_GATE_EXIT_REQUEST_7f3a9b2c__` 因为...
-      Token 是 __RALPH_QUALITY_GATE_EXIT_REQUEST_7f3a9b2c__ 这个字符串
-    """
-    # 按行检查
-    for line in message.split('\n'):
-        line = line.strip()
-        # 精确匹配: 整行就是 Token
-        if line == EXIT_TOKEN:
-            return True
-    
-    return False
-
-
-def run_quality_gate() -> tuple[bool, str]:
-    if not os.path.exists(QUALITY_GATE_SCRIPT):
-        return False, f"Quality Gate 脚本不存在: {QUALITY_GATE_SCRIPT}"
-    
-    try:
-        result = subprocess.run(
-            [QUALITY_GATE_SCRIPT],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd=PROJECT_DIR
-        )
-        
-        output = result.stdout + result.stderr
-        return (result.returncode == 0, output)
-        
-    except subprocess.TimeoutExpired:
-        return False, "Quality Gate 执行超时 (>5分钟)"
-    except Exception as e:
-        return False, f"Quality Gate 执行失败: {e}"
-
-
-def main():
-    try:
-        input_str = sys.stdin.read()
-        if not input_str.strip():
-            allow_exit()
-        
-        payload = json.loads(input_str)
-        log(f"[INPUT] keys={list(payload.keys())}")
-        
-        transcript_path = payload.get("transcript_path", "")
-        
-        if not transcript_path or not os.path.exists(transcript_path):
-            log("[INFO] No transcript, allowing exit")
-            allow_exit()
-        
-        # 关键修复: 只提取最后一条 assistant 消息
-        last_message = extract_last_assistant_message(transcript_path)
-        log(f"[DEBUG] Last assistant message length: {len(last_message)}")
-        
-        if not last_message:
-            log("[INFO] No assistant message found, allowing exit")
-            allow_exit()
-        
-        # 关键修复: 检查 Token 是否单独成行
-        if not check_token_in_message(last_message):
-            log("[INFO] No valid exit token in last message, allowing normal stop")
-            allow_exit()
-        
-        # 发现有效的退出请求，运行 Quality Gate
-        log("[INFO] Valid exit token detected, running Quality Gate...")
-        
-        passed, output = run_quality_gate()
-        
-        if passed:
-            log("[SUCCESS] Quality Gate passed")
-            print("✅ Quality Gate 通过", file=sys.stderr)
-            allow_exit()
-        else:
-            # 关键修复: 保存失败信息到文件
-            save_failure("Quality Gate 测试失败", output)
-            
-            error_summary = output[-1000:] if len(output) > 1000 else output
-            block_exit(
-                f"Quality Gate 失败！你不能退出。\n\n"
-                f"错误摘要:\n{error_summary}\n\n"
-                f"详细信息已保存到 .ralph/last_failure.md\n"
-                f"请阅读该文件了解失败原因，修复后重试。"
-            )
-    
-    except Exception as e:
-        log(f"[ERROR] Unexpected: {e}")
-        allow_exit()
-
-
-if __name__ == "__main__":
-    main()
-PYTHON_EOF
-
-chmod +x .claude/hooks/stop_hook.py
-echo -e "${GREEN}✓ .claude/hooks/stop_hook.py (修复版)${NC}"
-
-# ==========================================
-# 6. Script: Quality Gate (修复: 智能端口检测)
-# ==========================================
-echo -e "\n${YELLOW}[Step 6] 创建 Quality Gate 脚本 (智能端口)...${NC}"
-
-cat << 'BASH_EOF' > scripts/quality_gate.sh
-#!/bin/bash
-# ==========================================
-# Quality Gate V7.1 - 智能端口检测
-# ==========================================
-
-set -e
-
-LOG_DIR="logs"
-mkdir -p "$LOG_DIR"
-
-SERVER_PID=""
-TIMEOUT="${QUALITY_GATE_TIMEOUT:-30}"
-
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-cleanup() {
-    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        echo -e "${YELLOW}🧹 停止测试服务器 (PID $SERVER_PID)...${NC}"
-        kill "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
-}
-
-trap cleanup EXIT INT TERM
-
-echo "══════════════════════════════════════════"
-echo "🧪 Quality Gate V7.1"
-echo "══════════════════════════════════════════"
-
-# ----------------------------------------
-# 1. 智能检测端口
-# ----------------------------------------
-echo -e "\n${YELLOW}[1/4] 检测项目配置...${NC}"
-
-detect_port() {
-    # 优先使用环境变量
-    if [ -n "$QUALITY_GATE_PORT" ]; then
-        echo "$QUALITY_GATE_PORT"
-        return
-    fi
-    
-    # 检查 vite.config.ts/js
-    if [ -f "vite.config.ts" ] || [ -f "vite.config.js" ]; then
-        echo "5173"  # Vite 默认端口
-        return
-    fi
-    
-    # 检查 package.json 中的端口配置
-    if [ -f "package.json" ]; then
-        # 检查是否有 vite
-        if grep -q '"vite"' package.json; then
-            echo "5173"
-            return
-        fi
-        # 检查是否有 next
-        if grep -q '"next"' package.json; then
-            echo "3000"
-            return
-        fi
-        # 检查是否有 nuxt
-        if grep -q '"nuxt"' package.json; then
-            echo "3000"
-            return
-        fi
-    fi
-    
-    # 检查 .env 文件
-    if [ -f ".env" ]; then
-        PORT_FROM_ENV=$(grep -E "^PORT=" .env 2>/dev/null | cut -d'=' -f2)
-        if [ -n "$PORT_FROM_ENV" ]; then
-            echo "$PORT_FROM_ENV"
-            return
-        fi
-    fi
-    
-    # 默认端口
-    echo "3000"
-}
-
-detect_start_command() {
-    if [ -f "package.json" ]; then
-        if grep -q '"dev"' package.json; then
-            echo "npm run dev"
-        elif grep -q '"start"' package.json; then
-            echo "npm start"
-        else
-            echo "npm start"
-        fi
-    elif [ -f "requirements.txt" ]; then
-        echo "python -m http.server $PORT"
-    else
-        echo ""
-    fi
-}
-
-PORT=$(detect_port)
-START_CMD=$(detect_start_command)
-
-echo -e "  检测到端口: ${GREEN}$PORT${NC}"
-echo -e "  启动命令: ${GREEN}$START_CMD${NC}"
-
-# ----------------------------------------
-# 2. 检查测试文件
-# ----------------------------------------
-echo -e "\n${YELLOW}[2/4] 检查测试文件...${NC}"
-
-if [ ! -d "tests/e2e" ]; then
-    echo -e "${RED}❌ tests/e2e 目录不存在${NC}"
-    exit 1
-fi
-
-TEST_COUNT=$(find tests/e2e -name "*.spec.ts" -o -name "*.spec.js" -o -name "*.test.ts" -o -name "*.test.js" 2>/dev/null | wc -l | tr -d ' ')
-
-if [ "$TEST_COUNT" -eq 0 ]; then
-    echo -e "${RED}❌ 没有找到测试文件${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}✓ 找到 $TEST_COUNT 个测试文件${NC}"
-
-# ----------------------------------------
-# 3. 检查/启动服务器
-# ----------------------------------------
-echo -e "\n${YELLOW}[3/4] 检查服务器状态...${NC}"
-
-check_port() {
-    if command -v lsof &> /dev/null; then
-        lsof -Pi :"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1
-    elif command -v ss &> /dev/null; then
-        ss -tuln | grep -q ":$PORT "
-    else
-        (echo > /dev/tcp/localhost/"$PORT") 2>/dev/null
-    fi
-}
-
-if check_port; then
-    echo -e "${GREEN}✓ 服务器已在 :$PORT 运行${NC}"
-    # 警告: 检查是否为预期服务
-    if command -v lsof &> /dev/null; then
-        PROC_NAME=$(lsof -Pi :"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 | xargs -I{} ps -p {} -o comm= 2>/dev/null || echo "unknown")
-        echo -e "${YELLOW}  进程: $PROC_NAME${NC}"
-    fi
-else
-    if [ -z "$START_CMD" ]; then
-        echo -e "${RED}❌ 无法检测启动命令，请手动启动服务器或设置 QUALITY_GATE_PORT${NC}"
-        exit 1
-    fi
-    
-    echo -e "  启动服务器: $START_CMD"
-    $START_CMD > "$LOG_DIR/server.log" 2>&1 &
-    SERVER_PID=$!
-    
-    echo -e "  等待端口 $PORT..."
-    for i in $(seq 1 "$TIMEOUT"); do
-        if check_port; then
-            echo -e "${GREEN}✓ 服务器已启动 (${i}s)${NC}"
-            break
-        fi
-        
-        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-            echo -e "${RED}❌ 服务器启动失败${NC}"
-            cat "$LOG_DIR/server.log" | tail -20
-            exit 1
-        fi
-        
-        sleep 1
-        
-        if [ "$i" -eq "$TIMEOUT" ]; then
-            echo -e "${RED}❌ 服务器启动超时 (${TIMEOUT}s)${NC}"
-            exit 1
-        fi
-    done
-fi
-
-# ----------------------------------------
-# 4. 运行测试
-# ----------------------------------------
-echo -e "\n${YELLOW}[4/4] 运行 Playwright 测试...${NC}"
-
-# 检查 package.json 是否存在，不存在则初始化
-if [ ! -f "package.json" ]; then
-    echo -e "${YELLOW}  初始化 package.json...${NC}"
-    npm init -y
-fi
-
-if ! npx playwright --version > /dev/null 2>&1; then
-    echo -e "${YELLOW}  安装 Playwright...${NC}"
-    npm install -D @playwright/test
-    npx playwright install --with-deps chromium
-fi
-
-TEST_OUTPUT="$LOG_DIR/playwright_$(date +%Y%m%d_%H%M%S).log"
-
-# 关键修复: 将检测到的端口传递给 Playwright
-export PLAYWRIGHT_BASE_URL="http://localhost:$PORT"
-echo -e "  测试目标: ${BLUE}$PLAYWRIGHT_BASE_URL${NC}"
-
-if npx playwright test --reporter=list 2>&1 | tee "$TEST_OUTPUT"; then
-    echo ""
-    echo -e "${GREEN}══════════════════════════════════════════${NC}"
-    echo -e "${GREEN}✅ Quality Gate 通过！${NC}"
-    echo -e "${GREEN}══════════════════════════════════════════${NC}"
-    exit 0
-else
-    echo ""
-    echo -e "${RED}══════════════════════════════════════════${NC}"
-    echo -e "${RED}❌ Quality Gate 失败！${NC}"
-    echo -e "${RED}══════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}日志: $TEST_OUTPUT${NC}"
-    exit 1
-fi
-BASH_EOF
-
-chmod +x scripts/quality_gate.sh
-echo -e "${GREEN}✓ scripts/quality_gate.sh (智能端口检测)${NC}"
-
-# ==========================================
-# 7. Script: Ralph Loop
-# ==========================================
-echo -e "\n${YELLOW}[Step 7] 创建 Ralph Loop...${NC}"
-
-cat << 'BASH_EOF' > scripts/ralph_loop.sh
-#!/bin/bash
-# ==========================================
-# Ralph Loop V7.1
-# ==========================================
-
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$PROJECT_DIR"
-export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
-
-MAX_LOOPS="${RALPH_MAX_LOOPS:-50}"
-PROMPT_FILE="${RALPH_PROMPT_FILE:-$PROJECT_DIR/PROMPT.md}"
-LOG_DIR="$PROJECT_DIR/logs"
-SLEEP_BETWEEN="${RALPH_SLEEP:-2}"
-
-EXIT_TOKEN="__RALPH_QUALITY_GATE_EXIT_REQUEST_7f3a9b2c__"
-
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-YELLOW='\033[0;33m'
-NC='\033[0m'
-
-check_deps() {
-    local missing=0
-    
-    for cmd in jq claude; do
-        if ! command -v "$cmd" &> /dev/null; then
-            echo -e "${RED}❌ 缺少 $cmd${NC}"
-            missing=1
-        fi
-    done
-    
-    if [ ! -f "$PROMPT_FILE" ]; then
-        echo -e "${RED}❌ Prompt 文件不存在: $PROMPT_FILE${NC}"
-        missing=1
-    fi
-    
-    [ "$missing" -eq 1 ] && exit 1
-}
-
-main() {
-    echo -e "${BLUE}══════════════════════════════════════════${NC}"
-    echo -e "${BLUE}🚀 Ralph Loop V7.1${NC}"
-    echo -e "${BLUE}══════════════════════════════════════════${NC}"
-    
-    check_deps
-    mkdir -p "$LOG_DIR"
-    mkdir -p "$PROJECT_DIR/.ralph"
-    
-    # 清理超过 7 天的旧日志
-    find "$LOG_DIR" -name "loop_*.json" -mtime +7 -delete 2>/dev/null || true
-    find "$LOG_DIR" -name "loop_*.log" -mtime +7 -delete 2>/dev/null || true
-    
-    for ((i=1; i<=MAX_LOOPS; i++)); do
-        echo ""
-        echo -e "${BLUE}════════════════════════════════════════${NC}"
-        echo -e "${BLUE}🔄 Loop #$i / $MAX_LOOPS${NC}"
-        echo -e "${BLUE}════════════════════════════════════════${NC}"
-        
-        STDOUT_LOG="$LOG_DIR/loop_${i}_stdout.json"
-        STDERR_LOG="$LOG_DIR/loop_${i}_stderr.log"
-        
-        # 构建 prompt (包含失败记录，如果存在)
-        FULL_PROMPT=$(cat "$PROMPT_FILE")
-        
-        if [ -f "$PROJECT_DIR/.ralph/last_failure.md" ]; then
-            echo -e "${YELLOW}📋 发现上次失败记录，将包含在 prompt 中${NC}"
-            FULL_PROMPT="$FULL_PROMPT
-
----
-
-# ⚠️ 上次失败记录
-
-$(cat $PROJECT_DIR/.ralph/last_failure.md)
-
-请优先修复上述问题！"
-        fi
-        
-        echo -e "${YELLOW}执行 Claude...${NC}"
-        
-        CLAUDE_EXIT=0
-        claude -p "$FULL_PROMPT" \
-            --output-format json \
-            > "$STDOUT_LOG" \
-            2> "$STDERR_LOG" \
-            || CLAUDE_EXIT=$?
-        
-        echo -e "  Exit Code: $CLAUDE_EXIT"
-        
-        # 检查是否有阻断
-        if grep -q '"decision".*:.*"block"' "$STDERR_LOG" 2>/dev/null; then
-            echo -e "${RED}⚠️  Stop Hook 阻断了退出${NC}"
-            echo -e "${YELLOW}   查看 .ralph/last_failure.md 了解详情${NC}"
-        elif grep -qF "$EXIT_TOKEN" "$STDOUT_LOG" 2>/dev/null; then
-            # Token 在输出中且没有被阻断 = 成功
-            echo ""
-            echo -e "${GREEN}══════════════════════════════════════════${NC}"
-            echo -e "${GREEN}🎉 Ralph 完成任务！${NC}"
-            echo -e "${GREEN}══════════════════════════════════════════${NC}"
-            exit 0
-        else
-            echo -e "${YELLOW}⏳ 继续...${NC}"
-        fi
-        
-        [ "$i" -lt "$MAX_LOOPS" ] && sleep "$SLEEP_BETWEEN"
-    done
-    
-    echo -e "${RED}⚠️  达到最大循环次数${NC}"
-    exit 1
-}
-
-main "$@"
-BASH_EOF
-
-chmod +x scripts/ralph_loop.sh
-echo -e "${GREEN}✓ scripts/ralph_loop.sh${NC}"
-
-# ==========================================
-# 8. PROMPT.md (修复: 加入工具箱说明 + Token 规则)
-# ==========================================
-echo -e "\n${YELLOW}[Step 8] 创建 PROMPT.md...${NC}"
-
-cat << 'MD_EOF' > PROMPT.md
-# Role: Ralph - 自治测试工程师
-
-你是 Ralph，一个基于 MCP 的自治测试工程师。
-
----
-
-## 工具箱
-
-你有两个强大的武器：
-
-1. **Playwright MCP (`playwright`)**: 主力工具
-   - 用于编写 `.spec.ts` 测试文件
-   - 执行自动化测试
-
-2. **Browser-use MCP (`browser-use`)**: 视觉调试工具
-   - 当测试失败时，**必须**使用此工具打开网页查看
-   - 可以截图、检查 DOM 结构
-   - 帮助你理解页面实际状态
-
----
-
-## 工作流程
-
-### 1. 检查状态
-- 首先检查 `.ralph/last_failure.md` 是否存在
-- 如果存在，**优先修复**上次失败的问题
-
-### 2. 分析任务
-- 阅读 `specs/` 目录下的需求文档
-- 如果存在 `fix_plan.md`，处理其中的任务
-
-### 3. 编写代码
-- 实现所需功能
-- 遵循项目代码规范
-
-### 4. 编写测试 (必须!)
-- 在 `tests/e2e/` 目录下编写 Playwright E2E 测试
-- 测试文件命名: `*.spec.ts` 或 `*.spec.js`
-- 覆盖主要功能路径
-
-### 5. 自测验证
-- 运行 `./scripts/quality_gate.sh`
-- 如果失败:
-  1. 使用 **browser-use** 打开页面查看实际状态
-  2. 分析错误原因
-  3. 修复代码或测试
-  4. 重复直到通过
-
----
-
-## 安全规则
-
-### 禁止
-- `rm -rf` 危险删除
-- 访问系统敏感文件
-- `curl | sh` 等危险管道
-
-### 需确认
-- `git push/commit`
-- `npm publish`
-- `rm` 删除文件
-
----
-
-## 退出条件
-
-**全部满足才能退出:**
-
-1. ✅ 需求已实现
-2. ✅ 有对应的 E2E 测试
-3. ✅ `./scripts/quality_gate.sh` 通过
-4. ✅ 无已知 Bug
-
----
-
-## 退出请求格式
-
-⚠️ **重要规则**:
-
-当你确认可以退出时，在回复的**最后**，**单独一行**输出:
-
-__RALPH_QUALITY_GATE_EXIT_REQUEST_7f3a9b2c__
-
-**必须遵守**:
-- Token 必须单独占一行
-- 前后不能有其他文字
-- 不要放在代码块或引号里
-- 不要在讨论中提及这个 Token
-
-**正确示例**:
-```
-我已完成所有任务，测试全部通过。
-
-__RALPH_QUALITY_GATE_EXIT_REQUEST_7f3a9b2c__
-```
-
-**错误示例** (会被忽略):
-```
-Token 是 `__RALPH_QUALITY_GATE_EXIT_REQUEST_7f3a9b2c__`
-```
-
-如果 Gate 失败，你会收到阻断信息，请阅读 `.ralph/last_failure.md` 了解原因。
-MD_EOF
-
-echo -e "${GREEN}✓ PROMPT.md${NC}"
-
-# ==========================================
-# 9-12: 其余文件 (测试、配置等)
-# ==========================================
-echo -e "\n${YELLOW}[Step 9-12] 创建辅助文件...${NC}"
+echo -e "\n${YELLOW}[Step 8] 创建辅助文件...${NC}"
 
 # 示例测试
-cat << 'TS_EOF' > tests/e2e/example.spec.ts
+cat << 'TS_EOF' > "$TESTS_DIR/example.spec.ts"
 import { test, expect } from '@playwright/test';
 
 test.describe('示例测试', () => {
@@ -1232,54 +1307,46 @@ test.describe('示例测试', () => {
 });
 TS_EOF
 
+echo -e "${GREEN}✓ $TESTS_DIR/example.spec.ts${NC}"
+
 # Playwright 配置
-cat << 'TS_EOF' > playwright.config.ts
+if [ -n "$FRONTEND_DIR" ]; then
+    PLAYWRIGHT_CONFIG_PATH="$FRONTEND_DIR/playwright.config.ts"
+    mkdir -p "$FRONTEND_DIR/playwright"
+else
+    PLAYWRIGHT_CONFIG_PATH="playwright.config.ts"
+    mkdir -p "playwright"
+fi
+
+cat << TS_EOF > "$PLAYWRIGHT_CONFIG_PATH"
 import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/e2e',
   fullyParallel: true,
   retries: process.env.CI ? 2 : 0,
-  reporter: 'list',
+  
   use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3000',
+    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:$DEFAULT_PORT',
+    headless: true,
     trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
   },
+  
+  reporter: [['list']],
+  
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
   ],
 });
 TS_EOF
 
-# 任务模板
-cat << 'MD_EOF' > specs/fix_plan.md
-# 任务计划
+echo -e "${GREEN}✓ $PLAYWRIGHT_CONFIG_PATH${NC}"
 
-## 任务列表
-
-### 1. [任务名称]
-- **描述**: 
-- **验收标准**: 
-
-## 测试要求
-- E2E 测试在 `tests/e2e/`
-- 运行 `./scripts/quality_gate.sh` 验证
-MD_EOF
-
-# .gitignore (备份现有内容，避免重复)
-if [ -f ".gitignore" ]; then
-    # 移除旧的 Ralph 块（如果存在）
-    sed -i.bak '/# Ralph/,/^$/d' .gitignore 2>/dev/null || true
-    sed -i.bak '/# Node \/ System/,/^$/d' .gitignore 2>/dev/null || true
-    rm -f .gitignore.bak
-fi
-
-cat << 'EOF' >> .gitignore
-
+# .gitignore
+cat << 'EOF' > .gitignore
 # Ralph
 logs/
-.ralph/
-.claude/settings.local.json
 test-results/
 playwright-report/
 
@@ -1299,14 +1366,113 @@ echo -e "${GREEN}✓ 辅助文件已创建${NC}"
 # ==========================================
 echo ""
 echo -e "${BLUE}══════════════════════════════════════════${NC}"
-echo -e "${GREEN}✅ Ralph Loop V7.1 安装完成！${NC}"
+echo -e "${GREEN}✅ Ralph Loop V7.2 安装完成！${NC}"
 echo -e "${BLUE}══════════════════════════════════════════${NC}"
 echo ""
-echo -e "修复内容:"
-echo -e "  ✓ 加回 Browser-use MCP"
-echo -e "  ✓ Stop Hook 只检查最后一条消息"
-echo -e "  ✓ 失败信息落盘到 .ralph/last_failure.md"
-echo -e "  ✓ 智能端口检测 (Vite/Next/Nuxt)"
-echo -e "  ✓ 更精确的 Token 匹配"
+echo -e "📁 项目目录: ${CYAN}$PROJECT_DIR${NC}"
 echo ""
-echo -e "运行: ${GREEN}./scripts/ralph_loop.sh${NC}"
+echo -e "创建的文件:"
+echo -e "  ✓ .mcp.json"
+echo -e "  ✓ $PLAYWRIGHT_CONFIG_PATH"
+echo -e "  ✓ $TESTS_DIR/example.spec.ts"
+echo -e "  ✓ .gitignore"
+if [ "$BACKEND_INITIALIZED" = true ] && [ -n "$BACKEND_DIR" ]; then
+    echo -e "  ✓ (后端) $BACKEND_DIR"
+fi
+echo -e "创建的目录:"
+echo -e "  ✓ logs"
+echo -e "  ✓ docs"
+echo -e "  ✓ tests/e2e"
+echo -e "  ✓ playwright"
+echo ""
+echo -e "🚀 快速开始:"
+echo ""
+echo -e "  ${CYAN}# 1. 进入项目目录${NC}"
+echo -e "  cd $PROJECT_NAME"
+echo ""
+echo -e "  ${CYAN}# 2. 启动 Claude${NC}"
+echo -e "  claude"
+echo ""
+
+# ==========================================
+# Step 16: 生成 Manifest 文件
+# ==========================================
+echo -e "\n${YELLOW}[Step 16] 生成安装清单...${NC}"
+
+generate_manifest() {
+    local manifest_file="$PROJECT_DIR/.template-manifest.json"
+    local timestamp=$(date -Iseconds)
+    
+    # 根据项目结构确定实际路径
+    local tests_dir_path="$TESTS_DIR"
+    local playwright_config_path="$PLAYWRIGHT_CONFIG_PATH"
+    local playwright_dir_path="playwright"
+    if [ -n "$FRONTEND_DIR" ]; then
+        playwright_dir_path="$FRONTEND_DIR/playwright"
+    fi
+
+    local backend_files_json="[]"
+    local backend_dirs_json="[]"
+    local backend_category=""
+    if [ "$BACKEND_INITIALIZED" = true ] && [ -n "$BACKEND_DIR" ]; then
+        local backend_files=()
+        local backend_path="$PROJECT_DIR/$BACKEND_DIR"
+        for f in "main.py" "app.py" "server.js" "package.json" "package-lock.json" "yarn.lock" "pnpm-lock.yaml" "requirements.txt" "pyproject.toml" "go.mod" "Cargo.toml" "src/main.rs"; do
+            if [ -f "$backend_path/$f" ]; then
+                backend_files+=("$BACKEND_DIR/$f")
+            fi
+        done
+        backend_files_json=$(printf '%s\n' "${backend_files[@]}" | jq -R . | jq -s .)
+        backend_dirs_json=$(printf '%s\n' "$BACKEND_DIR" | jq -R . | jq -s .)
+        backend_category=$(cat << EOF
+    "backend-init": {
+      "name": "后端初始化",
+      "description": "由 install.sh 初始化的后端骨架",
+      "files": $backend_files_json,
+      "directories": $backend_dirs_json
+    },
+EOF
+)
+    fi
+    
+    cat << MANIFEST_EOF > "$manifest_file"
+{
+  "version": "7.2",
+  "installed_at": "$timestamp",
+  "project_name": "$PROJECT_NAME",
+  "frontend_dir": "$FRONTEND_DIR",
+  "default_port": "$DEFAULT_PORT",
+  "categories": {
+        "mcp-config": {
+      "name": "MCP 配置",
+      "description": "Model Context Protocol 服务器配置",
+      "files": [".mcp.json"],
+      "directories": []
+    },
+$backend_category
+        "test-examples": {
+            "name": "测试示例",
+            "description": "Playwright 测试模板和配置",
+            "files": ["$tests_dir_path/example.spec.ts", "$playwright_config_path"],
+            "directories": ["$tests_dir_path", "$playwright_dir_path"]
+        },
+    "meta-files": {
+      "name": "项目元文件",
+      "description": "日志、文档目录",
+      "files": [],
+            "directories": ["logs", "docs"]
+    }
+  }
+}
+MANIFEST_EOF
+
+    echo -e "${GREEN}✓ .template-manifest.json${NC}"
+}
+
+generate_manifest
+
+echo -e "${GREEN}✓ .template-manifest.json${NC}"
+
+echo ""
+echo -e "${CYAN}💡 提示: 如需卸载模板文件，运行 ./uninstall.sh${NC}"
+echo ""
