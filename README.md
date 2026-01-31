@@ -8,7 +8,115 @@ A production-minded template for **Claude Code** workflows, built for:
 > Goal: enable fast, reliable agentic coding without letting the assistant read your whole repo.
 
 ---
+## 🚀 Quick Start
 
+```bash
+# 1. Clone the template
+git clone https://github.com/dawenrenhub/claude_code_template.git
+cd claude_code_template
+
+# 2. Run the installer (Linux only)
+bash install.sh
+
+# 3. Start Ralph Loop
+./scripts/ralph_loop.sh
+```
+
+---
+
+## 📦 What install.sh Does
+
+The installer is **interactive** and will ask you about your project structure:
+
+### Step 1: Project Structure Selection
+```
+请选择你的项目结构:
+  1) 单体项目 (所有代码在根目录)
+  2) Monorepo - 前端在 frontend/
+  3) Monorepo - 前端在 client/
+  4) Monorepo - 前端在 web/
+  5) 自定义前端目录
+```
+
+### Step 2: Default Port Selection
+```
+请选择默认端口:
+  1) 3000 (Next.js / Express / 通用)
+  2) 5173 (Vite)
+  3) 8080 (Vue CLI / 通用)
+  4) 4200 (Angular)
+  5) 自定义端口
+```
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `.claude/settings.json` | Permissions, hooks, security rules |
+| `.claude/hooks/pre_tool_use.py` | Security hook - blocks dangerous commands |
+| `.claude/hooks/stop_hook.py` | Quality Gate enforcement on exit |
+| `.mcp.json` | MCP servers (Playwright + Browser-use) |
+| `scripts/quality_gate.sh` | Automated E2E test runner |
+| `scripts/ralph_loop.sh` | Main automation loop |
+| `playwright.config.ts` | Playwright configuration |
+| `playwright/llm-reporter.ts` | Token-optimized test reporter |
+| `tests/e2e/example.spec.ts` | Example test file |
+| `PROMPT.md` | Ralph agent instructions |
+| `.ralph/config.sh` | Project configuration |
+
+---
+
+## 🔧 V7.1 Features
+
+### 1. Intelligent Port Detection
+Automatically detects the correct port based on your framework:
+- Vite → 5173
+- Next.js → 3000
+- Nuxt → 3000
+- Or use your configured default
+
+### 2. Monorepo Support
+Files are placed in the correct directory based on your project structure:
+- Single repo: `./playwright.config.ts`, `./tests/e2e/`
+- Monorepo: `./frontend/playwright.config.ts`, `./frontend/tests/e2e/`
+
+### 3. LLM-Optimized Reporter
+Custom Playwright reporter that outputs minimal, LLM-friendly test results:
+```
+══════════════════════════════════════════
+📊 测试结果摘要 (LLM Reporter)
+══════════════════════════════════════════
+❌ 失败: 2/20
+✅ 通过: 18
+
+📋 失败详情:
+──────────────────────────────────────────
+1. login.spec.ts:15
+   测试: should login successfully
+   错误: Locator expected to be visible
+──────────────────────────────────────────
+```
+
+### 4. Failure Persistence
+Gate failures are saved to `.ralph/last_failure.md`, so Claude remembers what went wrong even after restart.
+
+### 5. Security Hooks
+PreToolUse hook blocks dangerous commands:
+- `rm -rf /`
+- `curl | sh`
+- `chmod 777`
+- And more...
+
+---
+
+## 📋 System Requirements
+
+- **OS**: Linux only (macOS not supported due to `sed -i` differences)
+- **Python**: 3.9+ (auto-upgrade available)
+- **Node.js**: 18+
+- **Dependencies**: jq, npx, pipx
+
+---
 ## What’s Included
 
 ### Core Claude Code Modules
