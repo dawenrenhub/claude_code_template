@@ -944,7 +944,6 @@ setup_python_tooling() {
         if prompt_yes_no "是否安装 pytest + pytest-cov?" "y"; then
             pip_install_list pytest pytest-cov
         fi
-    fi
         if [ ! -f "pytest.ini" ]; then
             cat << 'EOF' > pytest.ini
 [pytest]
@@ -956,7 +955,6 @@ EOF
         if prompt_yes_no "是否安装 ruff 进行代码检查?" "y"; then
             pip_install_list ruff
         fi
-    fi
         if [ ! -f "ruff.toml" ]; then
             cat << 'EOF' > ruff.toml
 [lint]
@@ -968,7 +966,6 @@ EOF
         if prompt_yes_no "是否安装 mypy 进行类型检查?" "y"; then
             pip_install_list mypy
         fi
-    fi
         if [ ! -f "mypy.ini" ]; then
             cat << 'EOF' > mypy.ini
 [mypy]
@@ -1171,32 +1168,16 @@ else
 fi
 
 # ==========================================
-# Step 2: 检测并安装 Superpowers
+# Step 2: 检测并安装 Superpowers（Claude Code 插件）
 # ==========================================
 echo -e "\n${YELLOW}[Step 2] 检测 Superpowers 插件...${NC}"
 
 check_superpowers() {
-    # 检查新版本地配置
-    if [ -f "$HOME/.claude.json" ]; then
-        if grep -q "superpower" "$HOME/.claude.json" 2>/dev/null; then
+    if command -v claude &> /dev/null; then
+        if claude plugin list 2>/dev/null | grep -qi "superpowers"; then
             return 0
         fi
     fi
-
-    # 检查全局 MCP 配置
-    if [ -f "$HOME/.claude/mcp.json" ]; then
-        if grep -q "superpower" "$HOME/.claude/mcp.json" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    
-    # 检查 claude settings
-    if [ -f "$HOME/.claude/settings.json" ]; then
-        if grep -q "superpower" "$HOME/.claude/settings.json" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    
     return 1
 }
 
@@ -1204,35 +1185,16 @@ if check_superpowers; then
     echo -e "${GREEN}✓ Superpowers 已安装${NC}"
 else
     echo -e "${YELLOW}⚠️ Superpowers 未检测到，自动安装...${NC}"
-    
-    # 使用 claude mcp add 命令（官方推荐方式）
+
     if command -v claude &> /dev/null; then
-        claude mcp add superpowers -- npx -y @anthropic-ai/superpower 2>/dev/null || {
-            echo -e "${YELLOW}  使用备用方式安装...${NC}"
-            
-            # 确保目录存在
-            mkdir -p "$HOME/.claude"
-            
-                        # 创建或更新 mcp.json
-            if [ -f "$HOME/.claude/mcp.json" ]; then
-                # 使用 jq 添加
-                jq '.mcpServers.superpowers = {"command": "npx", "args": ["-y", "@anthropic-ai/superpower"]}' \
-                    "$HOME/.claude/mcp.json" > "$HOME/.claude/mcp.json.tmp" && \
-                    mv "$HOME/.claude/mcp.json.tmp" "$HOME/.claude/mcp.json"
-            else
-                cat << 'EOF' > "$HOME/.claude/mcp.json"
-{
-  "mcpServers": {
-    "superpowers": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/superpower"]
-    }
-  }
-}
-EOF
-            fi
-        }
-        echo -e "${GREEN}✓ Superpowers 安装成功${NC}"
+        claude plugin marketplace add obra/superpowers-marketplace >/dev/null 2>&1 || true
+        if claude plugin install superpowers@superpowers-marketplace; then
+            echo -e "${GREEN}✓ Superpowers 安装成功${NC}"
+        else
+            echo -e "${RED}❌ Superpowers 安装失败，请手动执行：${NC}"
+            echo -e "${YELLOW}  /plugin marketplace add obra/superpowers-marketplace${NC}"
+            echo -e "${YELLOW}  /plugin install superpowers@superpowers-marketplace${NC}"
+        fi
     else
         echo -e "${RED}❌ Claude CLI 不可用，无法安装 Superpowers${NC}"
     fi
@@ -1772,20 +1734,16 @@ fi
 
 cat << 'EOF' > .mcp.json
 {
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-playwright"]
-    },
-    "browser-use": {
-      "command": "uvx",
-      "args": ["browser-use-mcp"]
-    },
-    "superpowers": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/superpower"]
+    "mcpServers": {
+        "playwright": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-playwright"]
+        },
+        "browser-use": {
+            "command": "uvx",
+            "args": ["browser-use-mcp"]
+        }
     }
-  }
 }
 EOF
 
