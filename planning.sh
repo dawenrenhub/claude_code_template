@@ -7,7 +7,7 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-DEFAULT_REQ_FILE="my_requirement.txt"
+DEFAULT_REQ_FILE="my_requirement.md"
 
 prompt_yes_no() {
   local prompt="$1"
