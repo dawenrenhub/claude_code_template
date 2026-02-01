@@ -1160,11 +1160,17 @@ if [ -d "$RALPH_REPO_DIR" ]; then
         git pull origin main || git pull origin master || true
         cd "$TEMPLATE_DIR"
         echo -e "${GREEN}✓ 更新完成${NC}"
+        echo -e "${YELLOW}运行 ralph-claude-code/install.sh...${NC}"
+        (cd "$RALPH_REPO_DIR" && ( [ -x ./install.sh ] && ./install.sh || bash ./install.sh ))
+        echo -e "${GREEN}✓ ralph-claude-code 安装完成${NC}"
     fi
 else
     echo -e "${YELLOW}下载 ralph-claude-code...${NC}"
     git clone https://github.com/frankbria/ralph-claude-code.git "$RALPH_REPO_DIR"
     echo -e "${GREEN}✓ 下载完成${NC}"
+    echo -e "${YELLOW}运行 ralph-claude-code/install.sh...${NC}"
+    (cd "$RALPH_REPO_DIR" && ( [ -x ./install.sh ] && ./install.sh || bash ./install.sh ))
+    echo -e "${GREEN}✓ ralph-claude-code 安装完成${NC}"
 fi
 
 # ==========================================

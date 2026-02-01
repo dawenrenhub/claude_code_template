@@ -7,7 +7,7 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-DEFAULT_REQ_FILE="my_requirement.md"
+DEFAULT_REQ_FILE="docs/my_requirements.md"
 
 prompt_yes_no() {
   local prompt="$1"
@@ -23,26 +23,44 @@ prompt_yes_no() {
   [[ "$REPLY" =~ ^[Yy]$ ]]
 }
 
+rel_path() {
+  local target="$1"
+  if command -v realpath &>/dev/null; then
+    realpath --relative-to="$PWD" "$target"
+  else
+    echo "$target"
+  fi
+}
+
 if ! command -v claude &> /dev/null; then
   echo -e "${RED}❌ 未找到 claude CLI，请先运行 install.sh 安装依赖${NC}"
   exit 1
 fi
 
-PROJECT_DIR=""
-while [ -z "$PROJECT_DIR" ]; do
-  read -p "请输入项目目录(相对或绝对路径): " INPUT_DIR
-  if [ -z "$INPUT_DIR" ]; then
-    echo -e "${RED}❌ 目录不能为空，请重新输入${NC}"
-    continue
-  fi
-  if [ ! -d "$INPUT_DIR" ]; then
-    echo -e "${RED}❌ 目录不存在：$INPUT_DIR${NC}"
-    continue
-  fi
-  PROJECT_DIR=$(cd "$INPUT_DIR" && pwd)
+echo -e "${YELLOW}🔎 正在检索可用项目目录...${NC}"
+mapfile -t PROJECT_DIRS < <(find . -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | grep -vE '^(ralph-claude-code|\.claude|\.git)$' | sort)
+
+if [ ${#PROJECT_DIRS[@]} -eq 0 ]; then
+  echo -e "${RED}❌ 未找到可用项目目录${NC}"
+  exit 1
+fi
+
+echo -e "${CYAN}请选择项目目录:${NC}"
+for i in "${!PROJECT_DIRS[@]}"; do
+  echo "  $((i+1))) ${PROJECT_DIRS[$i]}"
 done
 
+read -p "请输入序号: " SELECT_IDX
+if ! [[ "$SELECT_IDX" =~ ^[0-9]+$ ]] || [ "$SELECT_IDX" -lt 1 ] || [ "$SELECT_IDX" -gt ${#PROJECT_DIRS[@]} ]; then
+  echo -e "${RED}❌ 无效选择${NC}"
+  exit 1
+fi
+
+PROJECT_DIR="${PROJECT_DIRS[$((SELECT_IDX-1))]}"
+PROJECT_DIR=$(cd "$PROJECT_DIR" && pwd)
+
 REQ_FILE="$PROJECT_DIR/$DEFAULT_REQ_FILE"
+mkdir -p "$(dirname "$REQ_FILE")"
 
 echo -e "${CYAN}项目目录: $PROJECT_DIR${NC}"
 
@@ -51,7 +69,7 @@ if [ -f "$REQ_FILE" ]; then
   read -p "是否备份旧文件? [Y/n]: " BACKUP
   if [[ ! "$BACKUP" =~ ^[Nn]$ ]]; then
     TS=$(date +"%Y%m%d_%H%M%S")
-    BACKUP_FILE="${REQ_FILE%.txt}_backup_${TS}.txt"
+    BACKUP_FILE="${REQ_FILE%.*}_backup_${TS}.${REQ_FILE##*.}"
     cp "$REQ_FILE" "$BACKUP_FILE"
     echo -e "${GREEN}✓ 已备份到 $BACKUP_FILE${NC}"
   fi
@@ -163,7 +181,7 @@ if $RUN_STEP3; then
       :
     else
       TS=$(date +"%Y%m%d_%H%M%S")
-      REQ_FILE="$PROJECT_DIR/my_requirement_${TS}.txt"
+      REQ_FILE="$PROJECT_DIR/docs/my_requirements_${TS}.md"
       echo -e "${YELLOW}将写入新文件: $REQ_FILE${NC}"
     fi
   else
@@ -178,8 +196,14 @@ if $RUN_STEP3; then
     echo "## Todos (Generated)"
   } >> "$REQ_FILE"
 
-  # 取最近 1 小时生成的 plan 文件（按生成顺序），排除 design
-  RECENT_PLAN_FILES=$(find "$PLAN_DIR" -type f -mmin -60 -print0 | xargs -0 ls -tr 2>/dev/null || true)
+  # 取与最新 design 文件同一前缀（第四段）的一组 plan 文件（按生成顺序），排除 design
+  LATEST_BASE=$(basename "$LATEST_DESIGN_FILE")
+  IFS='-' read -r _ _ _ PREFIX4 _ <<< "$LATEST_BASE"
+  if [ -n "$PREFIX4" ]; then
+    RECENT_PLAN_FILES=$(find "$PLAN_DIR" -type f -name "*-${PREFIX4}-*.md" -print0 | xargs -0 -r ls -tr 2>/dev/null || true)
+  else
+    RECENT_PLAN_FILES=""
+  fi
 
   if [ -n "$RECENT_PLAN_FILES" ]; then
     while IFS= read -r f; do
@@ -226,6 +250,24 @@ EOF
 
   echo -e "${CYAN}🧹 使用 Claude (headless)整理 $REQ_FILE...${NC}"
   claude -p "$CLEANUP_PROMPT" > "$REQ_FILE"
+  echo -e "${GREEN}✓ 已完成整理并输出到 $REQ_FILE${NC}"
 else
   echo -e "${YELLOW}⏭️ 已跳过 Step 4${NC}"
+fi
+
+# ==========================================
+# Step 5: 可选 ralph-import 导入需求
+# ==========================================
+
+if prompt_yes_no "是否执行 ralph-import 导入需求?" "y"; then
+  if [ ! -f "$REQ_FILE" ]; then
+    echo -e "${RED}❌ 未找到需求文件：$REQ_FILE${NC}"
+    exit 1
+  fi
+  REL_REQ_FILE=$(rel_path "$REQ_FILE")
+  REL_PROJECT_DIR=$(rel_path "$PROJECT_DIR")
+  echo -e "${YELLOW}▶ 执行: ralph-import $REL_REQ_FILE $REL_PROJECT_DIR${NC}"
+  ralph-import "$REL_REQ_FILE" "$REL_PROJECT_DIR"
+else
+  echo -e "${YELLOW}⏭️ 已跳过 Step 5${NC}"
 fi

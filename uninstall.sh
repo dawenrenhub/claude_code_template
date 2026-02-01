@@ -687,6 +687,19 @@ main() {
         done
         for m in "${root_modules[@]}"; do
             if [ "$FORCE_YES" = true ] || confirm "删除 $m?" "n"; then
+                if [ "$m" = "ralph-claude-code" ]; then
+                    if [ -d "$SCRIPT_DIR/$m" ]; then
+                        if confirm "是否在 ralph-claude-code 内执行 ./uninstall.sh 删除系统内组件?" "n"; then
+                            if [ "$DRY_RUN" = true ]; then
+                                echo -e "  ${YELLOW}[DRY-RUN]${NC} 将执行: $m/./uninstall.sh"
+                            else
+                                (cd "$SCRIPT_DIR/$m" && ( [ -x ./uninstall.sh ] && ./uninstall.sh || bash ./uninstall.sh )) || log_error "执行 ralph-claude-code/uninstall.sh 失败"
+                            fi
+                        fi
+                    else
+                        log_skip "未找到 ralph-claude-code，跳过内部卸载"
+                    fi
+                fi
                 remove_root_item "$m"
             else
                 log_skip "跳过: $m"
