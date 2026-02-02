@@ -271,3 +271,11 @@ if prompt_yes_no "是否执行 ralph-import 导入需求?" "y"; then
 else
   echo -e "${YELLOW}⏭️ 已跳过 Step 5${NC}"
 fi
+
+# if prompt_yes_no "是否执行 ralph-enable?" "y"; then
+#   REL_PROJECT_DIR=$(rel_path "$PROJECT_DIR")
+#   echo -e "${YELLOW}▶ 进入项目目录并执行: ralph-enable${NC}"
+#   (cd "$REL_PROJECT_DIR" && ralph-enable)
+# else
+#   echo -e "${YELLOW}⏭️ 已跳过 ralph-enable${NC}"
+# fi
