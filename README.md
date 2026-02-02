@@ -1,224 +1,187 @@
-# Claude Code Template (Lean, Modular, Token-Safe)
+# Claude Code Template (V0.2)
 
-A production-minded template for **Claude Code** workflows, built for:
-- **Modularity**: turn modules on/off (MCP, LSP, Skills, Hooks, Ralph loop, tests, CI) via simple toggles.
-- **Token efficiency**: strict read scope allowlist to reduce context bloat and avoid long-context “rotting”.
-- **Safety + reproducibility**: guardrails, quality gates, and repeatable commands across local + CI.
-
-> Goal: enable fast, reliable agentic coding without letting the assistant read your whole repo.
+一个面向 Claude Code 的项目启动与协作模板，重点提供：
+- 可交互安装（支持新建/克隆/本地项目）
+- 前端/后端技术栈初始化与依赖安装
+- MCP 配置与 Playwright 基础测试配置
+- 可选卸载与恢复
 
 ---
 ## 🚀 Quick Start
 
 ```bash
-# 1. Clone the template
 git clone https://github.com/dawenrenhub/claude_code_template.git
 cd claude_code_template
 
-# 2. Run the installer (Linux only)
+# 安装（Linux）
 bash install.sh
-
-# 3. Start Ralph Loop
-./scripts/ralph_loop.sh
 ```
 
 ---
+## 📦 install.sh 做了什么
 
-## 📦 What install.sh Does
+### 1) 项目来源选择
+- 新项目
+- Git 克隆项目
+- 本地已有项目
 
-The installer is **interactive** and will ask you about your project structure:
+### 2) 目录结构选择
+支持单体项目或前端子目录模式（frontend/client/web/自定义）。
 
-### Step 1: Project Structure Selection
-```
-请选择你的项目结构:
-  1) 单体项目 (所有代码在根目录)
-  2) Monorepo - 前端在 frontend/
-  3) Monorepo - 前端在 client/
-  4) Monorepo - 前端在 web/
-  5) 自定义前端目录
-```
+### 3) 技术栈初始化（前端/后端）
+会明确询问技术栈类别，不会默认创建 package.json。
 
-### Step 2: Default Port Selection
-```
-请选择默认端口:
-  1) 3000 (Next.js / Express / 通用)
-  2) 5173 (Vite)
-  3) 8080 (Vue CLI / 通用)
-  4) 4200 (Angular)
-  5) 自定义端口
-```
+**前端选项**
+- Node.js (JavaScript)
+- TypeScript
+- 自定义命令
+- 跳过前端
 
-### Files Created
+**后端选项**
+- FastAPI / Flask / Django
+- Express / NestJS
+- Go (Gin)
+- Rust (Axum)
+- 自定义命令 / 跳过
 
-| File | Purpose |
-|------|---------|
-| `.claude/settings.json` | Permissions, hooks, security rules |
-| `.claude/hooks/pre_tool_use.py` | Security hook - blocks dangerous commands |
-| `.claude/hooks/stop_hook.py` | Quality Gate enforcement on exit |
-| `.mcp.json` | MCP servers (Playwright + Browser-use) |
-| `scripts/quality_gate.sh` | Automated E2E test runner |
-| `scripts/ralph_loop.sh` | Main automation loop |
-| `playwright.config.ts` | Playwright configuration |
-| `playwright/llm-reporter.ts` | Token-optimized test reporter |
-| `tests/e2e/example.spec.ts` | Example test file |
-| `PROMPT.md` | Ralph agent instructions |
-| `.ralph/config.sh` | Project configuration |
+### 4) Playwright 基础配置
+生成基础测试配置和示例测试，适配单体/前端子目录。
 
 ---
+## ✅ install.sh 详细执行清单
 
-## 🔧 V7.1 Features
+### 系统依赖与环境
+- 检查 Linux 系统
+- 检查并尝试安装依赖：git / jq / python3 / npx / claude / uvx
 
-### 1. Intelligent Port Detection
-Automatically detects the correct port based on your framework:
-- Vite → 5173
-- Next.js → 3000
-- Nuxt → 3000
-- Or use your configured default
+### 根目录（模板仓库）
+- Claude 根目录初始化（缺失则补齐）：
+  - .claude/settings.json
+  - .mcp.json
+- 下载/更新 ralph-claude-code
+- Superpowers 检测与安装（读取 ~/.claude.json / ~/.claude/mcp.json / ~/.claude/settings.json）
 
-### 2. Monorepo Support
-Files are placed in the correct directory based on your project structure:
-- Single repo: `./playwright.config.ts`, `./tests/e2e/`
-- Monorepo: `./frontend/playwright.config.ts`, `./frontend/tests/e2e/`
+### 项目来源选择
+- 新项目创建
+- Git 克隆项目
+- 本地已有项目
 
-### 3. LLM-Optimized Reporter
-Custom Playwright reporter that outputs minimal, LLM-friendly test results:
-```
-══════════════════════════════════════════
-📊 测试结果摘要 (LLM Reporter)
-══════════════════════════════════════════
-❌ 失败: 2/20
-✅ 通过: 18
+### 结构与端口
+- 前端目录结构选择：单体或前端子目录（frontend/client/web/自定义）
+- 默认端口选择
 
-📋 失败详情:
-──────────────────────────────────────────
-1. login.spec.ts:15
-   测试: should login successfully
-   错误: Locator expected to be visible
-──────────────────────────────────────────
-```
+### 技术栈初始化（显式询问）
+**前端**
+- Node.js / TypeScript / 自定义 / 跳过
+- Node.js：创建 package.json，并安装 Playwright
+- TypeScript：创建 package.json + tsconfig.json，并安装 TypeScript 依赖与 Playwright
+ - 可选安装 ESLint + Prettier
+ - 可选选择单测框架（Vitest/Jest）
 
-### 4. Failure Persistence
-Gate failures are saved to `.ralph/last_failure.md`, so Claude remembers what went wrong even after restart.
+**后端**
+- FastAPI / Flask / Django / Express / NestJS / Gin / Axum / 自定义 / 跳过
+- 选择后端会创建 backend/ 并生成示例入口与依赖配置
+ - Python 可选 pytest/ruff/mypy/Playwright
+ - Node 可选 ESLint + Prettier、Vitest/Jest
+ - Go/Rust 可选生成测试/覆盖率入口
 
-### 5. Security Hooks
-PreToolUse hook blocks dangerous commands:
-- `rm -rf /`
-- `curl | sh`
-- `chmod 777`
-- And more...
+**克隆项目模式**
+- 自动检测现有配置（package.json / requirements.txt / go.mod / Cargo.toml 等）
+- 根据检测结果询问是否安装依赖/补齐缺失配置
+- 不会默认创建 package.json
+
+### 项目目录内创建的目录
+- logs
+- docs
+- src（可选）
+- tests/unit（可选）
+- tests/e2e
+- playwright
+- 若前端为子目录，则目录创建在对应子目录下
+
+### 项目目录内生成的文件
+- .mcp.json
+- playwright.config.ts
+- tests/e2e/example.spec.ts
+- .gitignore（追加）
+- .template-manifest.json
+ - 可能生成：.eslintrc.json / .prettierrc / vitest.config.ts / jest.config.cjs
+ - 可能生成：pytest.ini / ruff.toml / mypy.ini
+ - 可选生成：.github/workflows/ci.yml
+
+### 后端初始化生成物（示例）
+**FastAPI**
+- backend/main.py
+- backend/requirements.txt
+
+**Flask**
+- backend/app.py
+- backend/requirements.txt
+
+**Django**
+- backend/requirements.txt
+- Django 项目结构（django-admin startproject 生成）
+
+**Express**
+- backend/package.json
+- backend/server.js
+
+**NestJS**
+- Nest CLI 生成的完整结构
+
+**Go (Gin)**
+- backend/go.mod
+- backend/main.go
+
+**Rust (Axum)**
+- backend/Cargo.toml
+- backend/src/main.rs
 
 ---
+## ✅ 生成/修改的内容（项目子目录）
 
+**目录**
+- logs
+- docs
+- tests/e2e
+- playwright
+
+**文件**
+- .mcp.json
+- playwright.config.ts
+- tests/e2e/example.spec.ts
+- .gitignore
+- .template-manifest.json
+
+> 若选择后端初始化，会在 backend/ 下生成对应骨架文件和依赖配置，并记录到清单。
+
+---
+## 🔧 其他脚本
+
+- init.sh：环境或流程初始化入口
+- planning.sh：规划/需求整理流程
+- restore.sh：恢复卸载时备份
+- uninstall.sh：卸载模板生成内容（支持根目录模块与子项目循环删除）
+
+---
+## 🧹 卸载与恢复
+
+```bash
+bash uninstall.sh
+```
+
+卸载流程支持：
+- 选择是否删除根目录模块
+- 循环输入子项目目录进行删除
+- 可选备份与恢复
+
+---
 ## 📋 System Requirements
 
-- **OS**: Linux only (macOS not supported due to `sed -i` differences)
-- **Python**: 3.9+ (auto-upgrade available)
-- **Node.js**: 18+
-- **Dependencies**: jq, npx, pipx
-
----
-## What’s Included
-
-### Core Claude Code Modules
-- **MCP (Model Context Protocol)**: optional tool servers with explicit endpoints and permissions.
-- **LSP (Language Server Protocol)**: LSP-friendly structure and consistent lint/format/typecheck entrypoints.
-- **Skills**: reusable, composable task playbooks (e.g., generate tests, refactor safely, doc updates).
-- **Ralph Loop**: iterative Plan → Implement → Verify → Summarize to keep work small and controlled.
-- **Hooks (Quality Gates)**: blocking/non-blocking hooks with fast vs full verification tiers.
-- **Repo Read/Write Scope Restriction**: allowlist-based access to reduce tokens and limit risk.
-- **Autonomous Basic Testing**: predictable `verify:fast` + `verify:full` pipelines.
-
-### Additional Modules Recommended for Long-Running Stability
-- **Rules / Guardrails**: explicit “how Claude should behave” to prevent chaotic changes.
-- **Context Management / Auto-Compact**: checkpoint summaries to keep sessions stable over time.
-- **Task Runner (Make/Just/Scripts)**: one entrypoint for all quality gates and workflows.
-- **CI/CD (GitHub Actions/GitLab CI)**: same verification steps in PRs to keep results reproducible.
-- **Secrets & Config Hygiene**: `.env.example`, secret scanning, safe config patterns.
-- **Environment & Dependency Locking**: lockfiles + optional Docker to prevent “works on my machine” drift.
-- **Changelog & Conventional Commits**: commit history becomes external memory + safer releases.
-- **Scaffolding / Codegen**: consistent module/test/doc generation to keep style uniform.
-- **Observability / Debug Artifacts**: logs/traces/screenshots for autonomous e2e debugging.
-- **PR / Review Templates**: structured diffs so reviewers and agents know what changed and why.
-- **Docs System (Architecture/Workflows/ADR)**: durable knowledge base so the model re-derives less.
-
----
-
-## Recommended Repo Structure
-
-You can adapt, but this structure is reliable:
-
-- `.claude/`
-  - `settings.json` (sandbox + allowlists + hooks + compact policy)
-  - `hooks/` (hook scripts)
-  - `skills/` (reusable skills/playbooks)
-  - `mcp/` (MCP configs)
-  - `rules/` (behavior guardrails / operating policy)
-- `scripts/` (toggles + orchestration)
-- `docs/`
-  - `ARCHITECTURE.md`
-  - `WORKFLOWS.md`
-  - `DECISIONS/` (ADRs)
-- `frontend/` (optional)
-- `backend/` (optional)
-- `tests/` (optional)
-- `Makefile` (or `justfile`) (recommended)
-
----
-
-## Modules Matrix (What / How to Toggle / Where)
-
-| Module | Purpose | Toggle | Location |
-|---|---|---:|---|
-| MCP | Tool access via MCP servers | ON/OFF | `.claude/mcp/` + `scripts/toggle.sh` |
-| LSP | Better editing + consistent checks | ON/OFF | editor config + `Makefile` |
-| Skills | Reusable “recipes” | ON/OFF | `.claude/skills/` |
-| Ralph Loop | Plan→Implement→Verify loop | ON/OFF | `.claude/rules/` + docs |
-| Hooks | Enforce gates automatically | ON/OFF + FAST/FULL | `.claude/settings.json` + `.claude/hooks/` |
-| Read Scope | Reduce tokens and risk | allowlist | `.claude/settings.json` |
-| Verify: Fast | Quick sanity checks | default | `Makefile` / `scripts/verify-fast.sh` |
-| Verify: Full | Full test suite (unit + e2e) | manual/CI | `Makefile` / `scripts/verify-full.sh` |
-| Auto-Compact | Prevent rotting | threshold | `.claude/settings.json` + `docs/STATE.md` |
-| CI | Reproducible gates on PRs | workflow files | `.github/workflows/` or `.gitlab-ci.yml` |
-| Secrets Hygiene | Prevent key leaks | scanner | CI + `.gitignore` + `.env.example` |
-| Locking | Prevent env drift | lockfiles | repo root |
-| Scaffolding | Consistent code style | command | `scripts/scaffold-*` |
-| Observability | Debug automation failures | artifacts | `logs/` + CI artifacts |
-| PR Template | Structured reviews | template | `.github/` |
-
----
-
-## Rules / Guardrails (Highly Recommended)
-
-Put explicit rules in `.claude/rules/` (or `CLAUDE.md`). Example principles:
-
-- **Small changes only**: prefer PR-sized diffs; avoid repo-wide refactors unless explicitly requested.
-- **Verify every change**: every functional change must include or update tests OR explain why not.
-- **Scope discipline**: only read/edit allowed folders; never “explore the repo” without need.
-- **No secrets**: never write tokens/keys/passwords into the repo; use `.env` and CI secrets.
-- **Explainability**: every output should include:
-  - What changed
-  - Why
-  - How to verify
-  - Risk + rollback note
-
----
-
-## Context Management (Anti-Rotting)
-
-Long sessions drift. This template expects you to checkpoint knowledge:
-
-- `docs/STATE.md`: current status, assumptions, “what is true now”
-- `docs/NEXT.md`: next steps
-- `docs/DECISIONS/ADR-*.md`: key decisions and why
-
-Recommended auto-compact behavior:
-- When context grows large, update `docs/STATE.md` and keep prompts narrowly scoped.
-
----
-
-## Token Control: Read/Write Allowlist (Core Feature)
-
-This template is built around an allowlist model:
+- Linux
+- Node.js 18+
+- Python 3.9+
+- jq / npx / pipx
 
 ### Read allowlist
 Include only what Claude needs:

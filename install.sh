@@ -117,6 +117,17 @@ check_dependency() {
                     npm install -g npx
                 fi
                 ;;
+            npm)
+                if [ "$os_manager" = "brew" ]; then
+                    install_with_brew node
+                elif [ "$os_manager" = "apt" ]; then
+                    install_with_apt nodejs
+                    install_with_apt npm
+                else
+                    echo -e "${RED}❌ 无法自动安装 npm，请手动安装${NC}"
+                    exit 1
+                fi
+                ;;
             claude)
                 if ! command -v npm &> /dev/null; then
                     echo -e "${YELLOW}⚠️ 未检测到 npm，尝试安装 Node.js...${NC}"
@@ -180,6 +191,7 @@ check_dependency() {
 check_dependency "git" "apt install git"
 check_dependency "jq" "apt install jq"
 check_dependency "python3" "apt install python3"
+check_dependency "npm" "apt install npm"
 check_dependency "npx" "npm install -g npx"
 check_dependency "claude" "npm install -g @anthropic-ai/claude-code"
 check_dependency "uvx" "pip install uv"
@@ -234,6 +246,60 @@ ensure_command() {
     command -v "$cmd" &> /dev/null
 }
 
+append_line_if_missing() {
+    local file="$1"
+    local line="$2"
+    touch "$file"
+    grep -Fqx "$line" "$file" 2>/dev/null || echo "$line" >> "$file"
+}
+
+ensure_dir() {
+    local dir="$1"
+    [ -z "$dir" ] && return 0
+    mkdir -p "$dir"
+}
+
+add_pkg_script_if_missing() {
+    local key="$1"
+    local value="$2"
+    if [ ! -f "package.json" ]; then
+        return 0
+    fi
+    jq --arg k "$key" --arg v "$value" \
+        '.scripts = (.scripts // {}) | if .scripts[$k] then . else .scripts[$k] = $v end' \
+        package.json > package.json.tmp && mv package.json.tmp package.json
+}
+
+has_pkg_dep() {
+    local name="$1"
+    if [ ! -f "package.json" ]; then
+        return 1
+    fi
+    jq -e --arg n "$name" '.dependencies[$n] or .devDependencies[$n]' package.json >/dev/null 2>&1
+}
+
+has_python_req() {
+    local name="$1"
+    if [ -f "requirements.txt" ] && grep -Eq "^${name}([=<>!]|$)" requirements.txt 2>/dev/null; then
+        return 0
+    fi
+    if [ -f "pyproject.toml" ] && grep -Eq "${name}" pyproject.toml 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+set_pkg_field_if_missing() {
+    local key="$1"
+    local value="$2"
+    if [ ! -f "package.json" ]; then
+        return 0
+    fi
+    jq --arg k "$key" --arg v "$value" \
+        'if .[$k] then . else .[$k] = $v end' \
+        package.json > package.json.tmp && mv package.json.tmp package.json
+}
+
 install_node_dependencies() {
     local manager
     manager=$(detect_package_manager)
@@ -272,7 +338,109 @@ install_playwright() {
             npm install -D @playwright/test
             ;;
     esac
-    npx playwright install
+    npx playwright install --with-deps 2>/dev/null || npx playwright install
+}
+
+install_eslint_prettier() {
+    local manager
+    manager=$(detect_package_manager)
+    case "$manager" in
+        pnpm)
+            ensure_command "pnpm" "pnpm" "pnpm" && pnpm add -D eslint prettier eslint-config-prettier eslint-plugin-prettier
+            ;;
+        yarn)
+            ensure_command "yarn" "yarn" "yarn" && yarn add -D eslint prettier eslint-config-prettier eslint-plugin-prettier
+            ;;
+        *)
+            npm install -D eslint prettier eslint-config-prettier eslint-plugin-prettier
+            ;;
+    esac
+    if [ ! -f ".eslintrc.json" ] && [ ! -f "eslint.config.js" ]; then
+        cat << 'EOF' > .eslintrc.json
+{
+  "env": { "browser": true, "node": true, "es2021": true },
+  "extends": ["eslint:recommended", "plugin:prettier/recommended"],
+  "parserOptions": { "ecmaVersion": "latest", "sourceType": "module" }
+}
+EOF
+    fi
+    if [ ! -f ".prettierrc" ]; then
+        cat << 'EOF' > .prettierrc
+{
+  "singleQuote": true,
+  "trailingComma": "all"
+}
+EOF
+    fi
+}
+
+install_vitest() {
+    local manager
+    manager=$(detect_package_manager)
+    case "$manager" in
+        pnpm)
+            ensure_command "pnpm" "pnpm" "pnpm" && pnpm add -D vitest
+            ;;
+        yarn)
+            ensure_command "yarn" "yarn" "yarn" && yarn add -D vitest
+            ;;
+        *)
+            npm install -D vitest
+            ;;
+    esac
+    if [ ! -f "vitest.config.ts" ] && [ ! -f "vitest.config.js" ]; then
+        cat << 'EOF' > vitest.config.ts
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    environment: 'node',
+  },
+});
+EOF
+    fi
+}
+
+install_jest() {
+    local manager
+    manager=$(detect_package_manager)
+    case "$manager" in
+        pnpm)
+            ensure_command "pnpm" "pnpm" "pnpm" && pnpm add -D jest
+            ;;
+        yarn)
+            ensure_command "yarn" "yarn" "yarn" && yarn add -D jest
+            ;;
+        *)
+            npm install -D jest
+            ;;
+    esac
+    if [ ! -f "jest.config.cjs" ]; then
+        cat << 'EOF' > jest.config.cjs
+module.exports = {
+  testEnvironment: 'node',
+};
+EOF
+    fi
+}
+
+setup_node_scripts() {
+    local unit_runner="$1"
+    add_pkg_script_if_missing "lint" "eslint . --fix"
+    add_pkg_script_if_missing "format" "prettier --write ."
+    if [ -f "tsconfig.json" ] || has_typescript_dep; then
+        add_pkg_script_if_missing "type-check" "tsc --noEmit"
+    fi
+    if [ "$unit_runner" = "vitest" ]; then
+        add_pkg_script_if_missing "test:unit" "vitest run"
+    elif [ "$unit_runner" = "jest" ]; then
+        add_pkg_script_if_missing "test:unit" "jest"
+    fi
+    add_pkg_script_if_missing "test:e2e" "npx playwright test"
+    if [ -n "$unit_runner" ]; then
+        add_pkg_script_if_missing "test" "npm run test:unit && npm run test:e2e"
+        add_pkg_script_if_missing "check" "npm run type-check && npm run lint && npm run test:unit"
+    fi
 }
 
 init_frontend_stack() {
@@ -285,10 +453,84 @@ init_frontend_stack() {
 
     case "$choice" in
         node)
-            (cd "$frontend_path" && init_node_stack)
+            (cd "$frontend_path" && {
+                init_node_stack
+                if ! has_pkg_dep "eslint" || ! has_pkg_dep "prettier"; then
+                    if prompt_yes_no "是否安装 ESLint + Prettier?" "y"; then
+                        install_eslint_prettier
+                    fi
+                fi
+                echo -e "${BLUE}选择前端单测框架:${NC}"
+                echo -e "  1) Vitest"
+                echo -e "  2) Jest"
+                echo -e "  3) 跳过"
+                UNIT_RUNNER=""
+                while true; do
+                    read -p "请输入选项 [1-3]: " UNIT_CHOICE
+                    case "$UNIT_CHOICE" in
+                        1)
+                            if ! has_pkg_dep "vitest"; then
+                                install_vitest
+                            fi
+                            UNIT_RUNNER="vitest"; break ;;
+                        2)
+                            if ! has_pkg_dep "jest"; then
+                                install_jest
+                            fi
+                            UNIT_RUNNER="jest"; break ;;
+                        3) break ;;
+                        *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
+                    esac
+                done
+                if ! has_playwright_dep; then
+                    if prompt_yes_no "是否安装 Playwright (E2E)?" "y"; then
+                        install_playwright
+                    fi
+                fi
+                if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
+                    setup_node_scripts "$UNIT_RUNNER"
+                fi
+            })
             ;;
         ts)
-            (cd "$frontend_path" && init_typescript_stack)
+            (cd "$frontend_path" && {
+                init_typescript_stack
+                if ! has_pkg_dep "eslint" || ! has_pkg_dep "prettier"; then
+                    if prompt_yes_no "是否安装 ESLint + Prettier?" "y"; then
+                        install_eslint_prettier
+                    fi
+                fi
+                echo -e "${BLUE}选择前端单测框架:${NC}"
+                echo -e "  1) Vitest"
+                echo -e "  2) Jest"
+                echo -e "  3) 跳过"
+                UNIT_RUNNER=""
+                while true; do
+                    read -p "请输入选项 [1-3]: " UNIT_CHOICE
+                    case "$UNIT_CHOICE" in
+                        1)
+                            if ! has_pkg_dep "vitest"; then
+                                install_vitest
+                            fi
+                            UNIT_RUNNER="vitest"; break ;;
+                        2)
+                            if ! has_pkg_dep "jest"; then
+                                install_jest
+                            fi
+                            UNIT_RUNNER="jest"; break ;;
+                        3) break ;;
+                        *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
+                    esac
+                done
+                if ! has_playwright_dep; then
+                    if prompt_yes_no "是否安装 Playwright (E2E)?" "y"; then
+                        install_playwright
+                    fi
+                fi
+                if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
+                    setup_node_scripts "$UNIT_RUNNER"
+                fi
+            })
             ;;
         custom)
             (cd "$frontend_path" && init_custom_stack)
@@ -304,6 +546,7 @@ init_backend_fastapi() {
     mkdir -p "$backend_path"
     (cd "$backend_path" && {
         init_python_stack "yes"
+        setup_python_tooling
         if [ ! -f "main.py" ]; then
             cat << 'PY_EOF' > main.py
 from fastapi import FastAPI
@@ -335,6 +578,7 @@ init_backend_flask() {
     mkdir -p "$backend_path"
     (cd "$backend_path" && {
         init_python_stack "yes"
+        setup_python_tooling
         if [ ! -f "app.py" ]; then
             cat << 'PY_EOF' > app.py
 from flask import Flask
@@ -368,6 +612,7 @@ init_backend_django() {
     mkdir -p "$backend_path"
     (cd "$backend_path" && {
         init_python_stack "yes"
+        setup_python_tooling
         if prompt_yes_no "是否安装 Django 并创建项目?" "y"; then
             if [ ! -f "requirements.txt" ]; then
                 : > requirements.txt
@@ -398,6 +643,36 @@ init_backend_express() {
             npm init -y
         fi
         npm install express
+        if ! has_pkg_dep "eslint" || ! has_pkg_dep "prettier"; then
+            if prompt_yes_no "是否安装 ESLint + Prettier?" "y"; then
+                install_eslint_prettier
+            fi
+        fi
+        echo -e "${BLUE}选择后端单测框架:${NC}"
+        echo -e "  1) Vitest"
+        echo -e "  2) Jest"
+        echo -e "  3) 跳过"
+        UNIT_RUNNER=""
+        while true; do
+            read -p "请输入选项 [1-3]: " UNIT_CHOICE
+            case "$UNIT_CHOICE" in
+                1)
+                    if ! has_pkg_dep "vitest"; then
+                        install_vitest
+                    fi
+                    UNIT_RUNNER="vitest"; break ;;
+                2)
+                    if ! has_pkg_dep "jest"; then
+                        install_jest
+                    fi
+                    UNIT_RUNNER="jest"; break ;;
+                3) break ;;
+                *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
+            esac
+        done
+        if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
+            setup_node_scripts "$UNIT_RUNNER"
+        fi
         if [ ! -f "server.js" ]; then
             cat << 'JS_EOF' > server.js
 const express = require('express');
@@ -426,6 +701,38 @@ init_backend_nest() {
         return 0
     fi
     npx @nestjs/cli new "$backend_path"
+    (cd "$backend_path" && {
+        if ! has_pkg_dep "eslint" || ! has_pkg_dep "prettier"; then
+            if prompt_yes_no "是否安装 ESLint + Prettier?" "y"; then
+                install_eslint_prettier
+            fi
+        fi
+        echo -e "${BLUE}选择后端单测框架:${NC}"
+        echo -e "  1) Vitest"
+        echo -e "  2) Jest"
+        echo -e "  3) 跳过"
+        UNIT_RUNNER=""
+        while true; do
+            read -p "请输入选项 [1-3]: " UNIT_CHOICE
+            case "$UNIT_CHOICE" in
+                1)
+                    if ! has_pkg_dep "vitest"; then
+                        install_vitest
+                    fi
+                    UNIT_RUNNER="vitest"; break ;;
+                2)
+                    if ! has_pkg_dep "jest"; then
+                        install_jest
+                    fi
+                    UNIT_RUNNER="jest"; break ;;
+                3) break ;;
+                *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
+            esac
+        done
+        if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
+            setup_node_scripts "$UNIT_RUNNER"
+        fi
+    })
 }
 
 init_backend_gin() {
@@ -433,6 +740,17 @@ init_backend_gin() {
     mkdir -p "$backend_path"
     (cd "$backend_path" && {
         init_go_stack
+        if prompt_yes_no "是否生成 Go 测试/覆盖率入口 (Makefile)?" "n"; then
+            if [ ! -f "Makefile" ]; then
+                cat << 'EOF' > Makefile
+test:
+	go test ./...
+
+coverage:
+	go test ./... -coverprofile=coverage.out
+EOF
+            fi
+        fi
         if prompt_yes_no "是否安装 Gin 并生成示例?" "y"; then
             go get github.com/gin-gonic/gin
             if [ ! -f "main.go" ]; then
@@ -459,6 +777,17 @@ init_backend_rust_axum() {
     mkdir -p "$backend_path"
     (cd "$backend_path" && {
         init_rust_stack
+        if prompt_yes_no "是否生成 Rust 测试/覆盖率入口 (Makefile)?" "n"; then
+            if [ ! -f "Makefile" ]; then
+                cat << 'EOF' > Makefile
+test:
+	cargo test
+
+coverage:
+	@echo "如需覆盖率，建议安装 cargo-tarpaulin"
+EOF
+            fi
+        fi
         if prompt_yes_no "是否安装 Axum 并生成示例?" "y"; then
             cargo add axum tokio --features tokio/full
             if [ ! -f "src/main.rs" ]; then
@@ -540,7 +869,9 @@ init_node_stack() {
         echo -e "${YELLOW}初始化 Node.js 项目...${NC}"
         npm init -y
     fi
-    install_playwright
+    if prompt_yes_no "是否设置 package.json 为 ES Module (type: module)?" "n"; then
+        set_pkg_field_if_missing "type" "module"
+    fi
 }
 
 init_typescript_stack() {
@@ -549,7 +880,23 @@ init_typescript_stack() {
         npm init -y
     fi
     install_typescript_deps
-    install_playwright
+    if [ ! -f "tsconfig.json" ]; then
+        cat << 'EOF' > tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true
+  },
+  "include": ["src", "tests"]
+}
+EOF
+    fi
+    if prompt_yes_no "是否设置 package.json 为 ES Module (type: module)?" "n"; then
+        set_pkg_field_if_missing "type" "module"
+    fi
 }
 
 init_python_stack() {
@@ -576,6 +923,71 @@ init_python_stack() {
     fi
 }
 
+pip_install_list() {
+    local pkgs=("$@")
+    if [ ${#pkgs[@]} -eq 0 ]; then
+        return 0
+    fi
+    if [ -d ".venv" ]; then
+        ./.venv/bin/pip install "${pkgs[@]}"
+    else
+        if prompt_yes_no "检测到系统 Python 受管理(PEP 668)。是否使用 --break-system-packages 安装?" "n"; then
+            pip3 install --break-system-packages "${pkgs[@]}"
+        else
+            echo -e "${YELLOW}⚠️ 已跳过系统级安装，请先创建 .venv 再安装依赖${NC}"
+        fi
+    fi
+}
+
+setup_python_tooling() {
+    if ! has_python_req "pytest" || ! has_python_req "pytest-cov"; then
+        if prompt_yes_no "是否安装 pytest + pytest-cov?" "y"; then
+            pip_install_list pytest pytest-cov
+        fi
+        if [ ! -f "pytest.ini" ]; then
+            cat << 'EOF' > pytest.ini
+[pytest]
+testpaths = tests
+EOF
+        fi
+    fi
+    if ! has_python_req "ruff"; then
+        if prompt_yes_no "是否安装 ruff 进行代码检查?" "y"; then
+            pip_install_list ruff
+        fi
+        if [ ! -f "ruff.toml" ]; then
+            cat << 'EOF' > ruff.toml
+[lint]
+select = ["E", "F", "I"]
+EOF
+        fi
+    fi
+    if ! has_python_req "mypy"; then
+        if prompt_yes_no "是否安装 mypy 进行类型检查?" "y"; then
+            pip_install_list mypy
+        fi
+        if [ ! -f "mypy.ini" ]; then
+            cat << 'EOF' > mypy.ini
+[mypy]
+python_version = 3.11
+ignore_missing_imports = true
+EOF
+        fi
+    fi
+    if ! has_python_req "playwright"; then
+        if prompt_yes_no "是否安装 Python Playwright (E2E)?" "n"; then
+            pip_install_list playwright
+        fi
+    fi
+    if has_python_req "playwright"; then
+        if [ -d ".venv" ]; then
+            ./.venv/bin/python -m playwright install --with-deps 2>/dev/null || ./.venv/bin/python -m playwright install
+        else
+            python3 -m playwright install --with-deps 2>/dev/null || python3 -m playwright install
+        fi
+    fi
+}
+
 init_go_stack() {
     if ! ensure_command "go" "golang" "go"; then
         return 1
@@ -586,6 +998,12 @@ init_go_stack() {
             go mod init "$GO_MODULE"
         fi
     fi
+    if prompt_yes_no "是否运行 go mod tidy?" "y"; then
+        go mod tidy
+    fi
+    if prompt_yes_no "是否需要 golangci-lint (手动安装提示)?" "n"; then
+        echo -e "${YELLOW}请参考: https://golangci-lint.run/usage/install/${NC}"
+    fi
 }
 
 init_rust_stack() {
@@ -594,6 +1012,9 @@ init_rust_stack() {
     fi
     if [ ! -f "Cargo.toml" ]; then
         cargo init
+    fi
+    if prompt_yes_no "是否需要 rustfmt/clippy 检查?" "n"; then
+        rustup component add rustfmt clippy 2>/dev/null || true
     fi
 }
 
@@ -739,40 +1160,30 @@ if [ -d "$RALPH_REPO_DIR" ]; then
         git pull origin main || git pull origin master || true
         cd "$TEMPLATE_DIR"
         echo -e "${GREEN}✓ 更新完成${NC}"
+        echo -e "${YELLOW}运行 ralph-claude-code/install.sh...${NC}"
+        (cd "$RALPH_REPO_DIR" && ( [ -x ./install.sh ] && ./install.sh || bash ./install.sh ))
+        echo -e "${GREEN}✓ ralph-claude-code 安装完成${NC}"
     fi
 else
     echo -e "${YELLOW}下载 ralph-claude-code...${NC}"
     git clone https://github.com/frankbria/ralph-claude-code.git "$RALPH_REPO_DIR"
     echo -e "${GREEN}✓ 下载完成${NC}"
+    echo -e "${YELLOW}运行 ralph-claude-code/install.sh...${NC}"
+    (cd "$RALPH_REPO_DIR" && ( [ -x ./install.sh ] && ./install.sh || bash ./install.sh ))
+    echo -e "${GREEN}✓ ralph-claude-code 安装完成${NC}"
 fi
 
 # ==========================================
-# Step 2: 检测并安装 Superpowers
+# Step 2: 检测并安装 Superpowers（Claude Code 插件）
 # ==========================================
 echo -e "\n${YELLOW}[Step 2] 检测 Superpowers 插件...${NC}"
 
 check_superpowers() {
-    # 检查新版本地配置
-    if [ -f "$HOME/.claude.json" ]; then
-        if grep -q "superpower" "$HOME/.claude.json" 2>/dev/null; then
+    if command -v claude &> /dev/null; then
+        if claude plugin list 2>/dev/null | grep -qi "superpowers"; then
             return 0
         fi
     fi
-
-    # 检查全局 MCP 配置
-    if [ -f "$HOME/.claude/mcp.json" ]; then
-        if grep -q "superpower" "$HOME/.claude/mcp.json" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    
-    # 检查 claude settings
-    if [ -f "$HOME/.claude/settings.json" ]; then
-        if grep -q "superpower" "$HOME/.claude/settings.json" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    
     return 1
 }
 
@@ -780,35 +1191,16 @@ if check_superpowers; then
     echo -e "${GREEN}✓ Superpowers 已安装${NC}"
 else
     echo -e "${YELLOW}⚠️ Superpowers 未检测到，自动安装...${NC}"
-    
-    # 使用 claude mcp add 命令（官方推荐方式）
+
     if command -v claude &> /dev/null; then
-        claude mcp add superpowers -- npx -y @anthropic-ai/superpower 2>/dev/null || {
-            echo -e "${YELLOW}  使用备用方式安装...${NC}"
-            
-            # 确保目录存在
-            mkdir -p "$HOME/.claude"
-            
-                        # 创建或更新 mcp.json
-            if [ -f "$HOME/.claude/mcp.json" ]; then
-                # 使用 jq 添加
-                jq '.mcpServers.superpowers = {"command": "npx", "args": ["-y", "@anthropic-ai/superpower"]}' \
-                    "$HOME/.claude/mcp.json" > "$HOME/.claude/mcp.json.tmp" && \
-                    mv "$HOME/.claude/mcp.json.tmp" "$HOME/.claude/mcp.json"
-            else
-                cat << 'EOF' > "$HOME/.claude/mcp.json"
-{
-  "mcpServers": {
-    "superpowers": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/superpower"]
-    }
-  }
-}
-EOF
-            fi
-        }
-        echo -e "${GREEN}✓ Superpowers 安装成功${NC}"
+        claude plugin marketplace add obra/superpowers-marketplace >/dev/null 2>&1 || true
+        if claude plugin install superpowers@superpowers-marketplace; then
+            echo -e "${GREEN}✓ Superpowers 安装成功${NC}"
+        else
+            echo -e "${RED}❌ Superpowers 安装失败，请手动执行：${NC}"
+            echo -e "${YELLOW}  /plugin marketplace add obra/superpowers-marketplace${NC}"
+            echo -e "${YELLOW}  /plugin install superpowers@superpowers-marketplace${NC}"
+        fi
     else
         echo -e "${RED}❌ Claude CLI 不可用，无法安装 Superpowers${NC}"
     fi
@@ -1010,10 +1402,30 @@ BACKEND_DIR=""
 BACKEND_REQUESTED=false
 BACKEND_INITIALIZED=false
 BACKEND_STACK=""
+
 if prompt_yes_no "是否有后端?" "n"; then
     BACKEND_REQUESTED=true
     read -p "后端目录名 (默认: backend): " BACKEND_DIR_INPUT
     BACKEND_DIR="${BACKEND_DIR_INPUT:-backend}"
+else
+    if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
+        for candidate in backend server api; do
+            if [ -d "$PROJECT_DIR/$candidate" ]; then
+                if prompt_yes_no "检测到后端目录: $candidate，是否使用?" "y"; then
+                    BACKEND_DIR="$candidate"
+                    BACKEND_REQUESTED=true
+                    break
+                fi
+            fi
+        done
+        if [ "$BACKEND_REQUESTED" = false ]; then
+            if prompt_yes_no "未检测到后端目录，是否初始化后端?" "n"; then
+                BACKEND_REQUESTED=true
+                read -p "后端目录名 (默认: backend): " BACKEND_DIR_INPUT
+                BACKEND_DIR="${BACKEND_DIR_INPUT:-backend}"
+            fi
+        fi
+    fi
 fi
 
 HAS_BACKEND=false
@@ -1036,6 +1448,10 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
                 install_node_dependencies
             fi
 
+            if prompt_yes_no "是否安装 ESLint + Prettier?" "n"; then
+                install_eslint_prettier
+            fi
+
             if [ -f "tsconfig.json" ] || has_typescript_dep; then
                 echo -e "${GREEN}✓ 检测到 TypeScript 配置${NC}"
                 if ! has_typescript_dep; then
@@ -1049,6 +1465,21 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
                 fi
             fi
 
+            echo -e "${BLUE}选择单测框架:${NC}"
+            echo -e "  1) Vitest"
+            echo -e "  2) Jest"
+            echo -e "  3) 跳过"
+            UNIT_RUNNER=""
+            while true; do
+                read -p "请输入选项 [1-3]: " UNIT_CHOICE
+                case "$UNIT_CHOICE" in
+                    1) install_vitest; UNIT_RUNNER="vitest"; break ;;
+                    2) install_jest; UNIT_RUNNER="jest"; break ;;
+                    3) break ;;
+                    *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
+                esac
+            done
+
             if has_playwright_dep; then
                 if prompt_yes_no "是否安装 Playwright 浏览器?" "y"; then
                     npx playwright install
@@ -1058,6 +1489,10 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
                     install_playwright
                 fi
             fi
+
+            if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
+                setup_node_scripts "$UNIT_RUNNER"
+            fi
         })
     fi
 
@@ -1065,7 +1500,10 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
         if [ -f "$BACKEND_PATH/pyproject.toml" ] || [ -f "$BACKEND_PATH/requirements.txt" ]; then
             HAS_STACK=true
             echo -e "${GREEN}✓ 检测到 Python 后端${NC}"
-            (cd "$BACKEND_PATH" && init_python_stack "no")
+            (cd "$BACKEND_PATH" && {
+                init_python_stack "no"
+                setup_python_tooling
+            })
         fi
 
         if [ -f "$BACKEND_PATH/go.mod" ]; then
@@ -1084,6 +1522,7 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
             HAS_STACK=true
             echo -e "${GREEN}✓ 检测到 Python 项目${NC}"
             init_python_stack "no"
+            setup_python_tooling
         fi
 
         if [ -f "go.mod" ]; then
@@ -1132,6 +1571,26 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
             echo -e "${GREEN}✓ 检测到 Node.js 后端${NC}"
             if prompt_yes_no "是否安装后端依赖?" "y"; then
                 (cd "$BACKEND_PATH" && install_node_dependencies)
+            fi
+            if prompt_yes_no "是否安装 ESLint + Prettier?" "n"; then
+                (cd "$BACKEND_PATH" && install_eslint_prettier)
+            fi
+            echo -e "${BLUE}选择后端单测框架:${NC}"
+            echo -e "  1) Vitest"
+            echo -e "  2) Jest"
+            echo -e "  3) 跳过"
+            UNIT_RUNNER=""
+            while true; do
+                read -p "请输入选项 [1-3]: " UNIT_CHOICE
+                case "$UNIT_CHOICE" in
+                    1) (cd "$BACKEND_PATH" && install_vitest); UNIT_RUNNER="vitest"; break ;;
+                    2) (cd "$BACKEND_PATH" && install_jest); UNIT_RUNNER="jest"; break ;;
+                    3) break ;;
+                    *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
+                esac
+            done
+            if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
+                (cd "$BACKEND_PATH" && setup_node_scripts "$UNIT_RUNNER")
             fi
         elif [ -f "$BACKEND_PATH/go.mod" ]; then
             echo -e "${GREEN}✓ 检测到 Go 后端${NC}"
@@ -1249,13 +1708,23 @@ fi
 # ==========================================
 echo -e "\n${YELLOW}[Step 6] 创建目录结构...${NC}"
 
-mkdir -p "$TESTS_DIR"
-mkdir -p logs
-mkdir -p docs
+if prompt_yes_no "是否创建标准目录结构 (src, tests/unit, tests/e2e, docs, logs)?" "y"; then
+    ensure_dir "src"
+    ensure_dir "tests/unit"
+    ensure_dir "$TESTS_DIR"
+    ensure_dir "docs"
+    ensure_dir "logs"
+else
+    ensure_dir "$TESTS_DIR"
+    ensure_dir "docs"
+    ensure_dir "logs"
+fi
 
 if [ -n "$FRONTEND_DIR" ]; then
-    mkdir -p "$FRONTEND_DIR"
+    ensure_dir "$FRONTEND_DIR"
 fi
+
+ensure_dir "$PLAYWRIGHT_CONFIG_DIR/playwright"
 
 echo -e "${GREEN}✓ 目录结构已创建${NC}"
 
@@ -1271,20 +1740,16 @@ fi
 
 cat << 'EOF' > .mcp.json
 {
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-playwright"]
-    },
-    "browser-use": {
-      "command": "uvx",
-      "args": ["browser-use-mcp"]
-    },
-    "superpowers": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/superpower"]
+    "mcpServers": {
+        "playwright": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-playwright"]
+        },
+        "browser-use": {
+            "command": "uvx",
+            "args": ["browser-use-mcp"]
+        }
     }
-  }
 }
 EOF
 
@@ -1343,21 +1808,23 @@ TS_EOF
 
 echo -e "${GREEN}✓ $PLAYWRIGHT_CONFIG_PATH${NC}"
 
-# .gitignore
-cat << 'EOF' > .gitignore
-# Ralph
-logs/
-test-results/
-playwright-report/
-
-# Node / System
-node_modules/
-.env
-.env.*
-.DS_Store
-dist/
-build/
-EOF
+# .gitignore (追加缺失项)
+append_line_if_missing .gitignore "# Ralph"
+append_line_if_missing .gitignore "logs/"
+append_line_if_missing .gitignore "test-results/"
+append_line_if_missing .gitignore "playwright-report/"
+append_line_if_missing .gitignore "# Node / System"
+append_line_if_missing .gitignore "node_modules/"
+append_line_if_missing .gitignore ".env"
+append_line_if_missing .gitignore ".env.*"
+append_line_if_missing .gitignore ".DS_Store"
+append_line_if_missing .gitignore "dist/"
+append_line_if_missing .gitignore "build/"
+append_line_if_missing .gitignore "coverage/"
+append_line_if_missing .gitignore "__pycache__/"
+append_line_if_missing .gitignore "*.pyc"
+append_line_if_missing .gitignore ".venv/"
+append_line_if_missing .gitignore ".pytest_cache/"
 
 echo -e "${GREEN}✓ 辅助文件已创建${NC}"
 
@@ -1434,6 +1901,68 @@ generate_manifest() {
 EOF
 )
     fi
+
+# CI/CD
+if prompt_yes_no "是否生成 GitHub Actions CI?" "n"; then
+        ensure_dir ".github/workflows"
+        cat << 'EOF' > .github/workflows/ci.yml
+name: CI
+
+on:
+    push:
+        branches: ["main"]
+    pull_request:
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up Node
+                if: hashFiles('package.json') != ''
+                uses: actions/setup-node@v4
+                with:
+                    node-version: 18
+                    cache: npm
+
+            - name: Install Node deps
+                if: hashFiles('package.json') != ''
+                run: npm ci
+
+            - name: Node lint/typecheck/unit
+                if: hashFiles('package.json') != ''
+                run: |
+                    npm run lint --if-present
+                    npm run type-check --if-present
+                    npm run test:unit --if-present
+
+            - name: Set up Python
+                if: hashFiles('requirements.txt') != '' || hashFiles('pyproject.toml') != ''
+                uses: actions/setup-python@v5
+                with:
+                    python-version: '3.11'
+
+            - name: Install Python deps
+                if: hashFiles('requirements.txt') != ''
+                run: pip install -r requirements.txt
+
+            - name: Python lint/typecheck/unit
+                if: hashFiles('requirements.txt') != '' || hashFiles('pyproject.toml') != ''
+                run: |
+                    ruff check . || true
+                    mypy . || true
+                    pytest -q || true
+
+            - name: Go test
+                if: hashFiles('go.mod') != ''
+                run: go test ./...
+
+            - name: Rust test
+                if: hashFiles('Cargo.toml') != ''
+                run: cargo test
+EOF
+fi
     
     cat << MANIFEST_EOF > "$manifest_file"
 {
@@ -1450,6 +1979,22 @@ EOF
       "directories": []
     },
 $backend_category
+        "tooling-config": {
+            "name": "工具链与测试配置",
+            "description": "Lint/Test/CI 配置文件",
+            "files": [
+                ".eslintrc.json",
+                ".prettierrc",
+                "vitest.config.ts",
+                "jest.config.cjs",
+                "pytest.ini",
+                "ruff.toml",
+                "mypy.ini",
+                ".github/workflows/ci.yml",
+                "Makefile"
+            ],
+            "directories": [".github/workflows"]
+        },
         "test-examples": {
             "name": "测试示例",
             "description": "Playwright 测试模板和配置",
