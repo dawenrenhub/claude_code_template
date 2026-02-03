@@ -7,7 +7,6 @@
 
 # Allow only these files at repo root
 !.gitignore
-!init.sh
 !install.sh
 !planning.sh
 !README.md
