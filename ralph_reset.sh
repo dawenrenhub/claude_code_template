@@ -49,6 +49,11 @@ RALPH_DIR="$PROJECT_DIR/.ralph"
 RALPH_RC="$PROJECT_DIR/.ralphrc"
 REQ_FILE="$PROJECT_DIR/$DEFAULT_REQ_FILE"
 PLAN_DIR="$PROJECT_DIR/docs/plans"
+LOGS_DIR="$PROJECT_DIR/logs"
+SRC_DIR="$PROJECT_DIR/src"
+TESTS_DIR="$PROJECT_DIR/tests"
+TEST_DEBUG_DIR="$PROJECT_DIR/test-debug"
+GIT_DIR="$PROJECT_DIR/.git"
 
 echo -e "${CYAN}项目目录: $PROJECT_DIR${NC}"
 
@@ -72,6 +77,18 @@ else
 fi
 
 # Part 2: my_requirements.md
+ROOT_REQ_FILE="$PROJECT_DIR/my_requirements.md"
+if prompt_yes_no "是否删除根目录的 my_requirements.md?" "n"; then
+  if [ -f "$ROOT_REQ_FILE" ]; then
+    rm -f "$ROOT_REQ_FILE"
+    echo -e "${GREEN}✓ 已删除 $ROOT_REQ_FILE${NC}"
+  else
+    echo -e "${YELLOW}⚠️ 未找到 $ROOT_REQ_FILE${NC}"
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过根目录 my_requirements.md${NC}"
+fi
+
 if prompt_yes_no "是否删除 $DEFAULT_REQ_FILE?" "n"; then
   if [ -f "$REQ_FILE" ]; then
     rm -f "$REQ_FILE"
@@ -93,4 +110,64 @@ if prompt_yes_no "是否删除 docs/plans 目录?" "n"; then
   fi
 else
   echo -e "${YELLOW}⏭️ 已跳过 Part 3${NC}"
+fi
+
+# Part 4: logs
+if prompt_yes_no "是否删除 logs 目录?" "n"; then
+  if [ -d "$LOGS_DIR" ]; then
+    rm -rf "$LOGS_DIR"
+    echo -e "${GREEN}✓ 已删除 $LOGS_DIR${NC}"
+  else
+    echo -e "${YELLOW}⚠️ 未找到 $LOGS_DIR${NC}"
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过 logs${NC}"
+fi
+
+# Part 5: src
+if prompt_yes_no "是否删除 src 目录?" "n"; then
+  if [ -d "$SRC_DIR" ]; then
+    rm -rf "$SRC_DIR"
+    echo -e "${GREEN}✓ 已删除 $SRC_DIR${NC}"
+  else
+    echo -e "${YELLOW}⚠️ 未找到 $SRC_DIR${NC}"
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过 src${NC}"
+fi
+
+# Part 6: tests
+if prompt_yes_no "是否删除 tests 目录?" "n"; then
+  if [ -d "$TESTS_DIR" ]; then
+    rm -rf "$TESTS_DIR"
+    echo -e "${GREEN}✓ 已删除 $TESTS_DIR${NC}"
+  else
+    echo -e "${YELLOW}⚠️ 未找到 $TESTS_DIR${NC}"
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过 tests${NC}"
+fi
+
+# Part 7: test-debug
+if prompt_yes_no "是否删除 test-debug 目录?" "n"; then
+  if [ -d "$TEST_DEBUG_DIR" ]; then
+    rm -rf "$TEST_DEBUG_DIR"
+    echo -e "${GREEN}✓ 已删除 $TEST_DEBUG_DIR${NC}"
+  else
+    echo -e "${YELLOW}⚠️ 未找到 $TEST_DEBUG_DIR${NC}"
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过 test-debug${NC}"
+fi
+
+# Part 8: .git
+if prompt_yes_no "是否删除 .git 目录?" "n"; then
+  if [ -d "$GIT_DIR" ]; then
+    rm -rf "$GIT_DIR"
+    echo -e "${GREEN}✓ 已删除 $GIT_DIR${NC}"
+  else
+    echo -e "${YELLOW}⚠️ 未找到 $GIT_DIR${NC}"
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过 .git${NC}"
 fi
