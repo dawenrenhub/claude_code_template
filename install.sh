@@ -1169,7 +1169,7 @@ if [ -d "$RALPH_REPO_DIR" ]; then
             echo -e "${YELLOW}删除旧的 ralph-claude-code 目录...${NC}"
             rm -rf "$RALPH_REPO_DIR"
             echo -e "${YELLOW}重新下载 ralph-claude-code...${NC}"
-            git clone https://github.com/frankbria/ralph-claude-code.git "$RALPH_REPO_DIR"
+            git clone https://github.com/dawenrenhub/ralph-claude-code.git "$RALPH_REPO_DIR"
             echo -e "${GREEN}✓ 更新完成${NC}"
         else
             echo -e "${YELLOW}⏭️ 已跳过删除和重新下载${NC}"
@@ -1190,7 +1190,7 @@ if [ -d "$RALPH_REPO_DIR" ]; then
     fi
 else
     echo -e "${YELLOW}下载 ralph-claude-code...${NC}"
-    git clone https://github.com/frankbria/ralph-claude-code.git "$RALPH_REPO_DIR"
+    git clone https://github.com/dawenrenhub/ralph-claude-code.git "$RALPH_REPO_DIR"
     echo -e "${GREEN}✓ 下载完成${NC}"
     echo -e "${YELLOW}运行 ralph-claude-code/install.sh...${NC}"
     (cd "$RALPH_REPO_DIR" && ( [ -x ./install.sh ] && ./install.sh || bash ./install.sh ))
