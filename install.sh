@@ -1157,9 +1157,33 @@ if [ -d "$RALPH_REPO_DIR" ]; then
     if [[ "$UPDATE_RALPH" =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}更新 ralph-claude-code...${NC}"
         cd "$RALPH_REPO_DIR"
-        git pull origin main || git pull origin master || true
+        if prompt_yes_no "是否执行 ralph-claude-code/uninstall.sh?" "y"; then
+            echo -e "${YELLOW}运行 ralph-claude-code/uninstall.sh...${NC}"
+            ( [ -x ./uninstall.sh ] && ./uninstall.sh || bash ./uninstall.sh )
+        else
+            echo -e "${YELLOW}⏭️ 已跳过 uninstall.sh${NC}"
+        fi
         cd "$TEMPLATE_DIR"
-        echo -e "${GREEN}✓ 更新完成${NC}"
+        
+        if prompt_yes_no "是否删除旧的 ralph-claude-code 目录并重新下载?" "y"; then
+            echo -e "${YELLOW}删除旧的 ralph-claude-code 目录...${NC}"
+            rm -rf "$RALPH_REPO_DIR"
+            echo -e "${YELLOW}重新下载 ralph-claude-code...${NC}"
+            git clone https://github.com/frankbria/ralph-claude-code.git "$RALPH_REPO_DIR"
+            echo -e "${GREEN}✓ 更新完成${NC}"
+        else
+            echo -e "${YELLOW}⏭️ 已跳过删除和重新下载${NC}"
+            if prompt_yes_no "是否执行 git pull 更新?" "y"; then
+                cd "$RALPH_REPO_DIR"
+                echo -e "${YELLOW}执行 git pull...${NC}"
+                git pull
+                cd "$TEMPLATE_DIR"
+                echo -e "${GREEN}✓ git pull 完成${NC}"
+            else
+                echo -e "${YELLOW}⏭️ 已跳过 git pull${NC}"
+            fi
+        fi
+        
         echo -e "${YELLOW}运行 ralph-claude-code/install.sh...${NC}"
         (cd "$RALPH_REPO_DIR" && ( [ -x ./install.sh ] && ./install.sh || bash ./install.sh ))
         echo -e "${GREEN}✓ ralph-claude-code 安装完成${NC}"
@@ -1174,42 +1198,43 @@ else
 fi
 
 # ==========================================
-# Step 2: 检测并安装 Superpowers（Claude Code 插件）
+# Step 2: 配置项目级 Superpowers（MCP）
 # ==========================================
-echo -e "\n${YELLOW}[Step 2] 检测 Superpowers 插件...${NC}"
+echo -e "\n${YELLOW}[Step 2] 配置项目级 Superpowers...${NC}"
 
-check_superpowers() {
-    if command -v claude &> /dev/null; then
-        if claude plugin list 2>/dev/null | grep -qi "superpowers"; then
+ROOT_MCP_FILE="$TEMPLATE_DIR/.mcp.json"
+
+ensure_superpowers_mcp() {
+    if [ -f "$ROOT_MCP_FILE" ]; then
+        if jq -e '.mcpServers.superpowers' "$ROOT_MCP_FILE" >/dev/null 2>&1; then
             return 0
         fi
+        tmp_file=$(mktemp)
+        jq '.mcpServers = (.mcpServers // {}) | .mcpServers.superpowers = {"command":"npx","args":["-y","@anthropic-ai/superpower"]}' \
+            "$ROOT_MCP_FILE" > "$tmp_file" && mv "$tmp_file" "$ROOT_MCP_FILE"
+    else
+        cat << 'EOF' > "$ROOT_MCP_FILE"
+{
+    "mcpServers": {
+        "superpowers": {
+            "command": "npx",
+            "args": ["-y", "@anthropic-ai/superpower"]
+        }
+    }
+}
+EOF
     fi
-    return 1
 }
 
-if check_superpowers; then
-    echo -e "${GREEN}✓ Superpowers 已安装${NC}"
-else
-    echo -e "${YELLOW}⚠️ Superpowers 未检测到，自动安装...${NC}"
-
-    if command -v claude &> /dev/null; then
-        claude plugin marketplace add obra/superpowers-marketplace >/dev/null 2>&1 || true
-        if claude plugin install superpowers@superpowers-marketplace; then
-            echo -e "${GREEN}✓ Superpowers 安装成功${NC}"
-        else
-            echo -e "${RED}❌ Superpowers 安装失败，请手动执行：${NC}"
-            echo -e "${YELLOW}  /plugin marketplace add obra/superpowers-marketplace${NC}"
-            echo -e "${YELLOW}  /plugin install superpowers@superpowers-marketplace${NC}"
-        fi
-    else
-        echo -e "${RED}❌ Claude CLI 不可用，无法安装 Superpowers${NC}"
-    fi
-fi
+ensure_superpowers_mcp
+echo -e "${GREEN}✓ Superpowers 已配置为项目级 MCP${NC}"
 
 # ==========================================
 # Step 3: 询问项目类型 (新项目 / 已有项目)
 # ==========================================
 echo -e "\n${YELLOW}[Step 3] 项目配置...${NC}"
+
+if prompt_yes_no "是否需要进行项目配置?" "n"; then
 
 echo ""
 echo -e "${BLUE}请选择项目类型:${NC}"
@@ -2017,6 +2042,10 @@ MANIFEST_EOF
 generate_manifest
 
 echo -e "${GREEN}✓ .template-manifest.json${NC}"
+
+else
+    echo -e "${YELLOW}⏭️ 已跳过项目配置${NC}"
+fi
 
 echo ""
 echo -e "${CYAN}💡 提示: 如需卸载模板文件，运行 ./uninstall.sh${NC}"
