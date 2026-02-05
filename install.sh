@@ -235,7 +235,15 @@ ensure_command() {
     fi
     local os_manager
     os_manager=$(detect_os)
-    if [ "$os_manager" = "apt" ] && [ -n "$apt_pkg" ]; then
+    # pnpm 在 apt 上没有包，需要通过 npm 安装
+    if [ "$cmd" = "pnpm" ] && [ "$os_manager" = "apt" ]; then
+        if ! command -v npm &> /dev/null; then
+            echo -e "${YELLOW}⚠️ 需要先安装 npm...${NC}"
+            install_with_apt nodejs
+            install_with_apt npm
+        fi
+        npm install -g pnpm
+    elif [ "$os_manager" = "apt" ] && [ -n "$apt_pkg" ]; then
         install_with_apt "$apt_pkg"
     elif [ "$os_manager" = "brew" ] && [ -n "$brew_pkg" ]; then
         install_with_brew "$brew_pkg"
@@ -1427,6 +1435,7 @@ BACKEND_DIR=""
 BACKEND_REQUESTED=false
 BACKEND_INITIALIZED=false
 BACKEND_STACK=""
+BACKEND_HANDLED=false
 
 if prompt_yes_no "是否有后端?" "n"; then
     BACKEND_REQUESTED=true
@@ -1529,18 +1538,21 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
                 init_python_stack "no"
                 setup_python_tooling
             })
+            BACKEND_HANDLED=true
         fi
 
         if [ -f "$BACKEND_PATH/go.mod" ]; then
             HAS_STACK=true
             echo -e "${GREEN}✓ 检测到 Go 后端${NC}"
             (cd "$BACKEND_PATH" && init_go_stack)
+            BACKEND_HANDLED=true
         fi
 
         if [ -f "$BACKEND_PATH/Cargo.toml" ]; then
             HAS_STACK=true
             echo -e "${GREEN}✓ 检测到 Rust 后端${NC}"
             (cd "$BACKEND_PATH" && init_rust_stack)
+            BACKEND_HANDLED=true
         fi
     else
         if [ -f "pyproject.toml" ] || [ -f "requirements.txt" ]; then
@@ -1588,7 +1600,7 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
         done
     fi
 
-    if [ "$HAS_BACKEND" = true ]; then
+    if [ "$HAS_BACKEND" = true ] && [ "$BACKEND_HANDLED" = false ]; then
         if [ -f "$BACKEND_PATH/pyproject.toml" ] || [ -f "$BACKEND_PATH/requirements.txt" ]; then
             echo -e "${GREEN}✓ 检测到 Python 后端${NC}"
             (cd "$BACKEND_PATH" && init_python_stack "no")
