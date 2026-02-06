@@ -497,8 +497,14 @@ if prompt_yes_no "是否审计 .ralph/PROMPT.md?" "y"; then
   如果存在"尽可能多完成"、"批量处理"等表述，或完全没提及任务数量限制，判定 FAIL。
 
 3. **反压机制 (Backpressure)**
-  PROMPT.md 必须要求在每次实现后运行验证命令（测试、lint、类型检查、构建），且必须明确声明"验证不通过不能标记任务完成"。
+  PROMPT.md 必须要求在每次实现后运行验证命令（测试、lint、类型检查、构建），且必须明确声明"验证不通过不能标记任务完成、不能提交"。
   如果只笼统提及"写测试"但没有要求运行验证，或没有"验证通过才能标记完成"的硬约束，判定 FAIL。
+
+3b. **硬性门禁与例外机制 (Hard Gate + Escape Hatch)**
+  PROMPT.md 必须明确：
+  - 测试未通过 → 禁止更新 fix_plan.md 为完成、禁止提交
+  - 若因环境/依赖导致无法通过测试 → 允许标记为 [BLOCKED] 并记录原因
+  如果只强调“测试必须通过”但没有失败兜底，判定 FAIL。
 
 4. **文件引用完整性 (File References)**
   PROMPT.md 必须引用以下文件：
@@ -548,6 +554,8 @@ if prompt_yes_no "是否审计 .ralph/PROMPT.md?" "y"; then
 总评: X/9 通过
 
 然后针对每个 FAIL 项，在表格下方逐项给出具体修改建议。修改建议必须是可以直接插入或替换到 PROMPT.md 中的实际文本，不要只写"建议添加阶段结构"这种笼统描述。
+
+所有修改建议必须给出"建议插入位置"和"可直接粘贴的文本"。
 
 ⚠️ 格式保持规则：所有修改建议必须延续 PROMPT.md 现有的格式风格（标题层级、列表风格、缩进方式、语言等）。如果原文用 `##` 做标题就用 `##`，如果原文用 `-` 做列表就用 `-`，如果原文是英文就写英文。不要引入原文中没有的格式元素。
 
@@ -1349,4 +1357,69 @@ EOF
   fi
 else
   echo -e "${YELLOW}⏭️ 已跳过 Step 13${NC}"
+fi
+
+# ==========================================
+# Step 14: .gitignore 与 Git 提交流程规范核查
+# ==========================================
+
+if prompt_yes_no "是否执行 .gitignore 与 Git 提交流程规范核查?" "y"; then
+  PROMPT_FILE="$PROJECT_DIR/.ralph/PROMPT.md"
+
+  if [ ! -f "$PROMPT_FILE" ]; then
+    echo -e "${RED}❌ 未找到 $PROMPT_FILE${NC}"
+    exit 1
+  fi
+
+  echo -e "${CYAN}🧹 启动 Claude Code（交互式）检查 .gitignore 与 Git 提交流程规范...${NC}"
+  if ! (cd "$PROJECT_DIR" && claude "$(cat <<'EOF'
+你是 Ralph 的 Git 规范核查助手。你的任务：
+1) 检查项目的 .gitignore 是否完整，尤其是 .ralph 运行态文件的忽略规则
+2) 检查 .ralph/PROMPT.md 是否明确包含 Git 提交与上传要求，并在必要时补充
+
+⚠️ 在我明确说"执行"之前，禁止修改任何文件。
+
+请按以下流程执行：
+
+## Part A: .gitignore 检查
+读取 .gitignore，判断是否已忽略以下运行态文件（仅忽略这些，不要忽略整个 .ralph 目录）：
+- .ralph/.call_count
+- .ralph/.circuit_breaker_*
+- .ralph/.exit_signals
+- .ralph/.last_reset
+- .ralph/.ralph_session*
+- .ralph/*.json
+- .ralph/live.log
+- .ralph/logs/
+
+如果缺失，请给出需要追加的具体规则文本，并提供可直接执行的 bash 命令（例如 cat <<'EOF' >> .gitignore ...）。
+
+## Part B: PROMPT.md Git 提交流程核查
+读取 .ralph/PROMPT.md，确认是否明确包含以下内容：
+1) 提交指令有哪些（至少包含 git add / git commit / git push 的示例）
+2) 什么时候必须执行一次提交到本地当前分支（每个模块测试通过后就需要提交）
+3) 你认为还需要补充的 Git 相关约束（例如：禁止未通过测试提交、保持分支干净、提交信息格式等）
+
+如果缺失，请给出需要插入或替换的具体文本（明确插入位置），并提供可直接执行的 bash 命令。
+
+## 输出要求
+1) 输出检查结论（PASS/FAIL）
+2) 如果 FAIL，提供“修改计划”并编号
+3) 给出可直接执行的 bash 修复命令
+4) 最后问我：
+
+> 以上是 .gitignore 与 Git 规范核查结果。你可以：
+> 1. 输入 **"执行全部"** — 我将按修改计划修复
+> 2. 输入 **"执行 1,3"** — 只执行指定编号
+> 3. 告诉我你想怎么改 — 我会调整计划后再执行
+> 4. 输入 **"跳过"** — 不做任何修改
+
+在收到我的回复前，不要修改任何文件。
+EOF
+)" ); then
+    echo -e "${RED}❌ Claude CLI 启动失败或已退出，请检查登录状态或网络${NC}"
+    exit 1
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过 Step 14${NC}"
 fi
