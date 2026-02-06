@@ -32,6 +32,14 @@ rel_path() {
   fi
 }
 
+render_prompt() {
+  local template="$1"
+  template=${template//__PROJECT_DIR__/$PROJECT_DIR}
+  template=${template//__LATEST_DESIGN_FILE__/$LATEST_DESIGN_FILE}
+  template=${template//__REQ_FILE__/$REQ_FILE}
+  echo "$template"
+}
+
 if ! command -v claude &> /dev/null; then
   echo -e "${RED}❌ 未找到 claude CLI，请先运行 install.sh 安装依赖${NC}"
   exit 1
@@ -103,7 +111,7 @@ if prompt_yes_no "是否生成项目文档 Finished.md?" "n"; then
     ITERATION=$((ITERATION + 1))
     echo -e "${CYAN}📝 迭代 $ITERATION/$MAX_ITERATIONS...${NC}"
 
-    if ! (cd "$PROJECT_DIR" && claude --print "$(cat <<EOF
+    if ! (cd "$PROJECT_DIR" && claude --print "$(cat <<'EOF'
 你是一个项目文档生成专家。你的任务是逐步完善 Finished.md 文件，直到项目文档完成。
 
 首先读取 Finished.md 的当前内容。
@@ -186,8 +194,8 @@ if prompt_yes_no "是否执行 Step 1: /brainstorm 需求澄清?" "y"; then
   echo -e "${CYAN}🚀 启动 Claude Code（交互式）...${NC}"
   echo -e "${YELLOW}提示：完成 /brainstorm 后请退出 Claude，脚本会进入下一步。${NC}"
 
-  if ! (cd "$PROJECT_DIR" && claude "$(cat <<EOF
-项目路径：${PROJECT_DIR}
+  BRAINSTORM_PROMPT=$(cat <<'EOF'
+项目路径：__PROJECT_DIR__
 
   请先判断这是不是一个新项目，并按以下步骤执行：
 
@@ -208,7 +216,9 @@ if prompt_yes_no "是否执行 Step 1: /brainstorm 需求澄清?" "y"; then
 
   现在开始向我提问以收集需求。
 EOF
- )" ); then
+)
+  BRAINSTORM_PROMPT=$(render_prompt "$BRAINSTORM_PROMPT")
+  if ! (cd "$PROJECT_DIR" && claude "$BRAINSTORM_PROMPT" ); then
     echo -e "${RED}❌ Claude CLI 启动失败或已退出，请检查登录状态或网络${NC}"
     exit 1
   fi
@@ -261,11 +271,13 @@ fi
 
 if $RUN_STEP2; then
   echo -e "${CYAN}🚀 启动 Claude Code(交互式)生成待办清单...${NC}"
-  if ! (cd "$PROJECT_DIR" && claude "$(cat <<EOF
+  WRITE_PLAN_PROMPT=$(cat <<'EOF'
 请使用 superpowers 的 /write-plan 功能调取最新生成的design.md生成待办清单。
-设计文档路径：${LATEST_DESIGN_FILE}
+设计文档路径：__LATEST_DESIGN_FILE__
 EOF
-)" ); then
+)
+  WRITE_PLAN_PROMPT=$(render_prompt "$WRITE_PLAN_PROMPT")
+  if ! (cd "$PROJECT_DIR" && claude "$WRITE_PLAN_PROMPT" ); then
     echo -e "${RED}❌ Claude CLI 启动失败或已退出，请检查登录状态或网络${NC}"
     exit 1
   fi
@@ -460,14 +472,14 @@ if prompt_yes_no "是否审计 .ralph/PROMPT.md?" "y"; then
   fi
 
   echo -e "${CYAN}🧾 启动 Claude Code（交互式）审计 PROMPT.md...${NC}"
-  if ! (cd "$PROJECT_DIR" && claude "$(cat <<EOF
+  if ! (cd "$PROJECT_DIR" && claude "$(cat <<'EOF'
 你是 Ralph 配置审查与修复助手。Ralph 是用于 Claude Code 的项目自动化工作流/脚手架工具，不是业务项目本身；它通过 .ralph/ 目录和 .ralphrc 配置来组织任务与驱动迭代。你的任务分为两步：
 1. 审查 .ralph/PROMPT.md，输出审计报告
 2. 等待我的指示，再决定是否执行修改
 
 ⚠️ 在我明确说"执行"之前，禁止修改任何文件。
 
-读取 .ralph/PROMPT.md 的完整内容，按以下 8 项检查标准逐一评估。每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议——给出建议添加或替换的实际文本内容，而不是笼统的描述。
+读取 .ralph/PROMPT.md 的完整内容，同时读取 .ralph/AGENT.md 作为测试命令对照，按以下 9 项检查标准逐一评估。每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议——给出建议添加或替换的实际文本内容，而不是笼统的描述。
 
 检查项：
 
@@ -517,6 +529,13 @@ if prompt_yes_no "是否审计 .ralph/PROMPT.md?" "y"; then
   - "优化性能"（无具体指标）
   如果存在此类指令，判定 FAIL 并建议替换为可衡量的标准。
 
+9. **测试指令覆盖与一致性 (Testing Coverage & Consistency)**
+  PROMPT.md 必须明确说明测试策略与调用来源，并与 AGENT.md 中的验证命令一致：
+  - 如果 AGENT.md 定义了 test:unit/test:e2e/pytest 等命令，PROMPT.md 需明确要求运行对应测试类别
+  - 如果 PROMPT.md 提到具体测试命令（如 pnpm test:unit），必须与 AGENT.md 中命令一致
+  - 若项目包含前后端，PROMPT.md 需明确分别验证前端与后端
+  若存在缺失或不一致，判定 FAIL。
+
 输出要求：
 
 先输出一张汇总表，格式如下：
@@ -526,7 +545,7 @@ if prompt_yes_no "是否审计 .ralph/PROMPT.md?" "y"; then
 | 1 | 阶段化结构 | ✅/❌ | 一句话说明 |
 | ... | ... | ... | ... |
 
-总评: X/8 通过
+总评: X/9 通过
 
 然后针对每个 FAIL 项，在表格下方逐项给出具体修改建议。修改建议必须是可以直接插入或替换到 PROMPT.md 中的实际文本，不要只写"建议添加阶段结构"这种笼统描述。
 
@@ -568,7 +587,7 @@ if prompt_yes_no "是否审计 .ralph/fix_plan.md?" "y"; then
   fi
 
   echo -e "${CYAN}🧾 启动 Claude Code（交互式）审计 fix_plan.md...${NC}"
-  if ! (cd "$PROJECT_DIR" && claude "$(cat <<EOF
+  if ! (cd "$PROJECT_DIR" && claude "$(cat <<'EOF'
 你是 Ralph 配置审查与修复助手。Ralph 是用于 Claude Code 的项目自动化工作流/脚手架工具，不是业务项目本身；它通过 .ralph/ 目录和 .ralphrc 配置来组织任务与驱动迭代。你的任务分为两步：
 1. 审查 .ralph/fix_plan.md，输出审计报告
 2. 等待我的指示，再决定是否执行修改
@@ -686,7 +705,7 @@ if prompt_yes_no "是否审查与补全 .ralph/specs/?" "y"; then
   fi
 
   echo -e "${CYAN}🧾 启动 Claude Code（交互式）审查 specs...${NC}"
-  if ! (cd "$PROJECT_DIR" && claude "$(cat <<EOF
+  if ! (cd "$PROJECT_DIR" && claude "$(cat <<'EOF'
 你是 Ralph 配置审查与修复助手。Ralph 是用于 Claude Code 的项目自动化工作流/脚手架工具，不是业务项目本身；它通过 .ralph/ 目录和 .ralphrc 配置来组织任务与驱动迭代。你的任务是审查并补全 .ralph/specs/ 目录。整个过程分为三个阶段，严格按顺序执行。
 
 ⚠️ 在我明确说"执行"之前，禁止修改或创建任何文件。
@@ -822,7 +841,7 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
   fi
 
   echo -e "${CYAN}🧾 启动 Claude Code（交互式）审计 AGENT.md...${NC}"
-  if ! (cd "$PROJECT_DIR" && claude "$(cat <<EOF
+  if ! (cd "$PROJECT_DIR" && claude "$(cat <<'EOF'
 你是 Ralph 配置审查与修复助手。Ralph 是用于 Claude Code 的项目自动化工作流/脚手架工具，不是业务项目本身；它通过 .ralph/ 目录和 .ralphrc 配置来组织任务与驱动迭代。你的任务分为两步：
 1. 审查 .ralph/AGENT.md，输出审计报告
 2. 等待我的指示，再决定是否执行修改
@@ -831,7 +850,7 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
 
 读取 .ralph/AGENT.md 的完整内容。同时读取 .ralph/PROMPT.md 作为交叉参考。
 
-按以下 7 项检查标准逐一评估，每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议。
+按以下 8 项检查标准逐一评估，每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议。
 
 检查项：
 
@@ -917,6 +936,12 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
   - 是否清晰说明了服务启动顺序（如：先启动后端 → 再启动前端 → 然后运行 E2E）
   - 是否说明了各服务运行的端口
 
+  **6f. E2E 测试框架配置**（针对需要数据验证的项目）：
+  - 如果项目需要在 E2E 测试中验证数据库写入，检查是否存在 tests/e2e/helpers/db.ts 或类似的数据库辅助文件
+  - 如果项目需要验证 OSS/文件上传，检查是否存在 tests/e2e/helpers/oss.ts 或类似的 OSS 辅助文件
+  - 如果存在这些辅助文件，AGENT.md 中是否说明了如何配置测试环境变量（.env.test）
+  - 检查 playwright.config.ts 中是否配置了 globalSetup 和 globalTeardown（用于测试数据清理）
+
   如果存在明显的遗漏前置条件，判定 FAIL。
 
 7. **职责边界清晰 (Clear Responsibility Boundary)**
@@ -925,6 +950,13 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
   - "What tasks to do"的内容（属于 fix_plan.md）
   - 编码风格、架构决策等指导性内容（属于 specs/）
   如果 AGENT.md 中混入了超出验证命令范围的内容，判定 FAIL，建议将越界内容移到对应文件。
+
+8. **测试命令覆盖与脚手架可用性 (Test Command Coverage & Scaffold Readiness)**
+  AGENT.md 必须覆盖项目需要的测试命令，并确保测试脚手架可用：
+  - 前端存在 tests/e2e 时，应包含 E2E 命令（如 pnpm test:e2e / npx playwright test）
+  - 若 E2E 命令存在，但 tests/e2e/ 或 playwright.config.ts 缺失，需在 AGENT.md 中说明如何生成（例如运行 install.sh 的对应步骤）
+  - 后端测试命令（pytest/go test/cargo test）如在项目中存在，应覆盖
+  缺失或不可达时判定 FAIL。
 
 输出要求：
 
@@ -935,7 +967,7 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
 | 1 | 文件存在性 | ✅/❌ | 一句话说明 |
 | ... | ... | ... | ... |
 
-总评: X/7 通过
+总评: X/8 通过
 
 然后针对每个 FAIL 项，在表格下方逐项给出具体修改建议。修改建议必须是可以直接插入或替换到 AGENT.md 中的实际文本，不要只写"建议添加测试命令"这种笼统描述。
 
@@ -989,7 +1021,7 @@ if prompt_yes_no "是否审计 .ralphrc?" "y"; then
   fi
 
   echo -e "${CYAN}🧾 启动 Claude Code（交互式）审计 .ralphrc...${NC}"
-  if ! (cd "$PROJECT_DIR" && claude "$(cat <<EOF
+  if ! (cd "$PROJECT_DIR" && claude "$(cat <<'EOF'
 你是 Ralph 配置审查与修复助手。Ralph 是用于 Claude Code 的项目自动化工作流/脚手架工具，不是业务项目本身；它通过 .ralph/ 目录和 .ralphrc 配置来组织任务与驱动迭代。你的任务分为两步：
 1. 审查 .ralph/.ralphrc 配置文件，输出审计报告
 2. 等待我的指示，再决定是否执行修改
@@ -1235,4 +1267,86 @@ EOF
   fi
 else
   echo -e "${YELLOW}⏭️ 已跳过 Step 12${NC}"
+fi
+
+# ==========================================
+# Step 13: 交互式测试配置核查与测试生成
+# ==========================================
+
+if prompt_yes_no "是否执行测试配置核查与测试生成?" "y"; then
+  PROMPT_FILE="$PROJECT_DIR/.ralph/PROMPT.md"
+  AGENT_FILE="$PROJECT_DIR/.ralph/AGENT.md"
+
+  if [ ! -f "$PROMPT_FILE" ]; then
+    echo -e "${RED}❌ 未找到 $PROMPT_FILE${NC}"
+    exit 1
+  fi
+  if [ ! -f "$AGENT_FILE" ]; then
+    echo -e "${RED}❌ 未找到 $AGENT_FILE${NC}"
+    exit 1
+  fi
+
+  echo -e "${CYAN}🧪 启动 Claude Code（交互式）核查测试配置与测试可用性...${NC}"
+  if ! (cd "$PROJECT_DIR" && claude "$(cat <<EOF
+你是 Ralph 测试配置审查与测试可用性验证助手。你的任务分为两步：
+1) 检查 PROMPT.md、AGENT.md 以及项目内所有测试配置，验证这些配置是否完整且可用
+2) 生成或调用对应测试，验证每个配置的测试是否能生效，并输出问题与修复计划
+
+⚠️ 在我明确说"执行"之前，禁止修改任何文件。
+
+请执行以下流程：
+
+## 阶段一：测试配置清单与一致性检查
+读取以下内容：
+- .ralph/PROMPT.md
+- .ralph/AGENT.md
+- 项目内所有测试配置文件（例如：playwright.config.ts、vitest.config.*、jest.config.*、pytest.ini、pytest.toml、pyproject.toml 的 [tool.pytest]、ruff.toml、mypy.ini、package.json scripts、frontend/tests/e2e、backend/tests 等）
+
+输出一个"测试配置清单"，逐项列出：
+- 配置文件路径
+- 相关命令来源（PROMPT.md / AGENT.md / package.json scripts / 其他）
+- 是否可直接执行
+
+并检查：
+- PROMPT.md 与 AGENT.md 中的测试命令是否一致
+- 是否缺失必要的测试命令（unit/e2e/lint/typecheck/build）
+- 前后端分离项目是否分别覆盖测试命令
+
+## 阶段二：生成/调用测试以验证可用性
+对"测试配置清单"中的每一项：
+1) 如果已有测试范例（例如 frontend/tests/e2e/example.spec.ts），直接调用它的测试命令进行验证
+2) 如果没有测试范例，请基于现有配置生成最小可运行测试（一个即可）
+3) 运行对应测试命令，记录结果
+
+结果判定：
+- 测试命令不存在/无法执行 → FAIL
+- 测试运行但失败 → FAIL（列出错误摘要）
+- 测试运行并通过 → PASS
+
+## 输出要求
+1) 输出一张汇总表：
+
+| 配置/命令 | 来源 | 结果 | 说明 |
+|---|---|---|---|
+
+2) 对每个 FAIL 项，列出：
+   - 失败原因摘要
+   - 建议的修改方案（具体到要修改的文件和内容）
+
+3) 给出"修改计划"（按步骤编号），然后问我：
+
+> 以上是测试配置核查与测试验证结果。你可以：
+> 1. 输入 **"执行全部"** — 我将按修改计划修复
+> 2. 输入 **"执行 1,3"** — 只执行指定编号
+> 3. 告诉我你想怎么改 — 我会调整计划后再执行
+> 4. 输入 **"跳过"** — 不做任何修改
+
+在收到我的回复前，不要修改任何文件。
+EOF
+)" ); then
+    echo -e "${RED}❌ Claude CLI 启动失败或已退出，请检查登录状态或网络${NC}"
+    exit 1
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过 Step 13${NC}"
 fi

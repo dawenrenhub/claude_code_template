@@ -210,6 +210,17 @@ prompt_yes_no() {
     [[ "$response" =~ ^[Yy]$ ]]
 }
 
+should_overwrite_file() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        if ! prompt_yes_no "检测到 $file 已存在，是否覆盖?" "n"; then
+            echo -e "${YELLOW}⏭️ 已跳过 $file${NC}"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 detect_package_manager() {
     if [ -f "pnpm-lock.yaml" ]; then
         echo "pnpm"
@@ -265,6 +276,32 @@ ensure_dir() {
     local dir="$1"
     [ -z "$dir" ] && return 0
     mkdir -p "$dir"
+}
+
+init_package_json() {
+    if [ -f "package.json" ]; then
+        return 0
+    fi
+
+    local project_name
+    project_name=$(basename "$PWD" | tr ' ' '-' )
+
+    if [ -f "README.md" ]; then
+        if prompt_yes_no "检测到 README.md 已存在，是否运行 npm init -y（可能覆盖 README.md）?" "n"; then
+            npm init -y
+        else
+            cat << EOF > package.json
+{
+  "name": "${project_name}",
+  "version": "0.1.0",
+  "private": true
+}
+EOF
+            echo -e "${GREEN}✓ 已创建 package.json（未覆盖 README.md）${NC}"
+        fi
+    else
+        npm init -y
+    fi
 }
 
 add_pkg_script_if_missing() {
@@ -347,6 +384,834 @@ install_playwright() {
             ;;
     esac
     npx playwright install --with-deps 2>/dev/null || npx playwright install
+}
+
+# Configure E2E framework with database and OSS verification helpers
+configure_e2e_framework() {
+    local frontend_path="${1:-.}"
+    local has_mysql="$2"
+    local has_oss="$3"
+    
+    echo -e "${BLUE}配置 E2E 测试框架...${NC}"
+    
+    local test_dir="$frontend_path/tests/e2e"
+    local helpers_dir="$test_dir/helpers"
+    mkdir -p "$helpers_dir"
+    
+    # Install additional dependencies based on project needs
+    local manager
+    manager=$(detect_package_manager)
+    local deps_to_install="dotenv"
+    
+    if [ "$has_mysql" = "yes" ]; then
+        deps_to_install="$deps_to_install mysql2"
+    fi
+    if [ "$has_oss" = "yes" ]; then
+        # Check if ali-oss is already installed
+        if ! has_pkg_dep "ali-oss"; then
+            deps_to_install="$deps_to_install ali-oss"
+        fi
+    fi
+    
+    if [ -n "$deps_to_install" ]; then
+        echo -e "${BLUE}安装 E2E 辅助依赖: $deps_to_install${NC}"
+        case "$manager" in
+            pnpm) pnpm add -D $deps_to_install ;;
+            yarn) yarn add -D $deps_to_install ;;
+            *) npm install -D $deps_to_install ;;
+        esac
+    fi
+    
+    # Create database helper if MySQL is used
+    if [ "$has_mysql" = "yes" ]; then
+        create_db_helper "$helpers_dir"
+    fi
+    
+    # Create OSS helper if OSS is used
+    if [ "$has_oss" = "yes" ]; then
+        create_oss_helper "$helpers_dir"
+    fi
+    
+    # Create auth helper for test user management
+    create_auth_helper "$helpers_dir"
+    
+    # Create .env.test.example
+    create_env_test_example "$frontend_path" "$has_mysql" "$has_oss"
+    
+    # Update playwright.config.ts with global setup/teardown
+    update_playwright_config "$frontend_path" "$has_mysql" "$has_oss"
+    
+    echo -e "${GREEN}✓ E2E 测试框架配置完成${NC}"
+    echo -e "${YELLOW}提示: 请复制 .env.test.example 为 .env.test 并填写实际值${NC}"
+}
+
+create_db_helper() {
+    local helpers_dir="$1"
+    local target_file="$helpers_dir/db.ts"
+    if ! should_overwrite_file "$target_file"; then
+        return 0
+    fi
+    cat << 'EOF' > "$target_file"
+/**
+ * Database helper for E2E tests
+ * Provides direct MySQL connection for data verification and cleanup
+ */
+import mysql, { Pool, RowDataPacket, ResultSetHeader } from 'mysql2/promise';
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+
+// Load test environment
+dotenv.config({ path: path.resolve(__dirname, '../../.env.test') });
+
+let pool: Pool | null = null;
+
+export interface DatabaseConfig {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+}
+
+export function getDbConfig(): DatabaseConfig {
+  return {
+    host: process.env.TEST_DB_HOST || 'localhost',
+    port: parseInt(process.env.TEST_DB_PORT || '3306'),
+    user: process.env.TEST_DB_USER || 'root',
+    password: process.env.TEST_DB_PASSWORD || '',
+    database: process.env.TEST_DB_NAME || 'test_db',
+  };
+}
+
+export async function getConnection(): Promise<Pool> {
+  if (!pool) {
+    pool = mysql.createPool({
+      ...getDbConfig(),
+      waitForConnections: true,
+      connectionLimit: 5,
+      queueLimit: 0,
+    });
+  }
+  return pool;
+}
+
+export async function closeConnection(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    pool = null;
+  }
+}
+
+/**
+ * Query the database and return typed results
+ */
+export async function query<T extends RowDataPacket[]>(
+  sql: string,
+  params?: (string | number | boolean | null)[]
+): Promise<T> {
+  const conn = await getConnection();
+  const [rows] = await conn.query<T>(sql, params);
+  return rows;
+}
+
+/**
+ * Execute a statement (INSERT, UPDATE, DELETE) and return result
+ */
+export async function execute(
+  sql: string,
+  params?: (string | number | boolean | null)[]
+): Promise<ResultSetHeader> {
+  const conn = await getConnection();
+  const [result] = await conn.execute<ResultSetHeader>(sql, params);
+  return result;
+}
+
+/**
+ * Verify a record exists in the database
+ */
+export async function verifyRecordExists(
+  table: string,
+  conditions: Record<string, string | number | boolean | null>
+): Promise<boolean> {
+  const keys = Object.keys(conditions);
+  const where = keys.map((k) => `\`${k}\` = ?`).join(' AND ');
+  const values = Object.values(conditions);
+  
+  const rows = await query(
+    `SELECT 1 FROM \`${table}\` WHERE ${where} LIMIT 1`,
+    values
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Get a record from the database
+ */
+export async function getRecord<T extends RowDataPacket>(
+  table: string,
+  conditions: Record<string, string | number | boolean | null>
+): Promise<T | null> {
+  const keys = Object.keys(conditions);
+  const where = keys.map((k) => `\`${k}\` = ?`).join(' AND ');
+  const values = Object.values(conditions);
+  
+  const rows = await query<T[]>(
+    `SELECT * FROM \`${table}\` WHERE ${where} LIMIT 1`,
+    values
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Delete test records (for cleanup)
+ * Use with caution - only for test data cleanup
+ */
+export async function deleteTestRecords(
+  table: string,
+  conditions: Record<string, string | number | boolean | null>
+): Promise<number> {
+  const keys = Object.keys(conditions);
+  const where = keys.map((k) => `\`${k}\` = ?`).join(' AND ');
+  const values = Object.values(conditions);
+  
+  const result = await execute(
+    `DELETE FROM \`${table}\` WHERE ${where}`,
+    values
+  );
+  return result.affectedRows;
+}
+
+/**
+ * Cleanup test data by prefix (for test isolation)
+ */
+export async function cleanupByPrefix(
+  table: string,
+  column: string,
+  prefix: string
+): Promise<number> {
+  const result = await execute(
+    `DELETE FROM \`${table}\` WHERE \`${column}\` LIKE ?`,
+    [`${prefix}%`]
+  );
+  return result.affectedRows;
+}
+EOF
+    echo -e "${GREEN}✓ 创建 $helpers_dir/db.ts${NC}"
+}
+
+create_oss_helper() {
+    local helpers_dir="$1"
+    local target_file="$helpers_dir/oss.ts"
+    if ! should_overwrite_file "$target_file"; then
+        return 0
+    fi
+    cat << 'EOF' > "$target_file"
+/**
+ * OSS helper for E2E tests
+ * Provides Alibaba OSS operations for file upload verification and cleanup
+ */
+import OSS from 'ali-oss';
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+
+// Load test environment
+dotenv.config({ path: path.resolve(__dirname, '../../.env.test') });
+
+let client: OSS | null = null;
+
+export interface OSSConfig {
+  region: string;
+  accessKeyId: string;
+  accessKeySecret: string;
+  bucket: string;
+  endpoint?: string;
+}
+
+export function getOSSConfig(): OSSConfig {
+  return {
+    region: process.env.TEST_OSS_REGION || 'oss-cn-hangzhou',
+    accessKeyId: process.env.TEST_OSS_ACCESS_KEY_ID || '',
+    accessKeySecret: process.env.TEST_OSS_ACCESS_KEY_SECRET || '',
+    bucket: process.env.TEST_OSS_BUCKET || '',
+    endpoint: process.env.TEST_OSS_ENDPOINT,
+  };
+}
+
+export function getOSSClient(): OSS {
+  if (!client) {
+    const config = getOSSConfig();
+    client = new OSS({
+      region: config.region,
+      accessKeyId: config.accessKeyId,
+      accessKeySecret: config.accessKeySecret,
+      bucket: config.bucket,
+      endpoint: config.endpoint,
+    });
+  }
+  return client;
+}
+
+/**
+ * Verify a file exists in OSS
+ */
+export async function verifyFileExists(objectKey: string): Promise<boolean> {
+  try {
+    const ossClient = getOSSClient();
+    await ossClient.head(objectKey);
+    return true;
+  } catch (error: unknown) {
+    const e = error as { code?: string };
+    if (e.code === 'NoSuchKey') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Get file metadata from OSS
+ */
+export async function getFileMeta(objectKey: string): Promise<{
+  size: number;
+  contentType: string;
+  lastModified: Date;
+  etag: string;
+} | null> {
+  try {
+    const ossClient = getOSSClient();
+    const result = await ossClient.head(objectKey);
+    return {
+      size: parseInt(result.res.headers['content-length'] as string || '0'),
+      contentType: result.res.headers['content-type'] as string || '',
+      lastModified: new Date(result.res.headers['last-modified'] as string || ''),
+      etag: result.res.headers['etag'] as string || '',
+    };
+  } catch (error: unknown) {
+    const e = error as { code?: string };
+    if (e.code === 'NoSuchKey') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Delete a file from OSS (for cleanup)
+ */
+export async function deleteFile(objectKey: string): Promise<boolean> {
+  try {
+    const ossClient = getOSSClient();
+    await ossClient.delete(objectKey);
+    return true;
+  } catch (error: unknown) {
+    const e = error as { code?: string };
+    if (e.code === 'NoSuchKey') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Delete multiple files by prefix (for test cleanup)
+ */
+export async function deleteByPrefix(prefix: string): Promise<number> {
+  const ossClient = getOSSClient();
+  let deleted = 0;
+  let continuationToken: string | undefined;
+  
+  do {
+    const listResult = await ossClient.listV2({
+      prefix,
+      'max-keys': 1000,
+      'continuation-token': continuationToken,
+    });
+    
+    const objects = listResult.objects || [];
+    if (objects.length > 0) {
+      const keys = objects.map((obj) => obj.name);
+      await ossClient.deleteMulti(keys, { quiet: true });
+      deleted += keys.length;
+    }
+    
+    continuationToken = listResult.nextContinuationToken;
+  } while (continuationToken);
+  
+  return deleted;
+}
+
+/**
+ * List files with a prefix
+ */
+export async function listFiles(prefix: string, maxKeys = 100): Promise<string[]> {
+  const ossClient = getOSSClient();
+  const result = await ossClient.listV2({
+    prefix,
+    'max-keys': maxKeys,
+  });
+  
+  return (result.objects || []).map((obj) => obj.name);
+}
+EOF
+    echo -e "${GREEN}✓ 创建 $helpers_dir/oss.ts${NC}"
+}
+
+create_auth_helper() {
+    local helpers_dir="$1"
+    local target_file="$helpers_dir/auth.ts"
+    if ! should_overwrite_file "$target_file"; then
+        return 0
+    fi
+    cat << 'EOF' > "$target_file"
+/**
+ * Auth helper for E2E tests
+ * Provides test user authentication utilities
+ */
+import { Page } from '@playwright/test';
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+
+// Load test environment
+dotenv.config({ path: path.resolve(__dirname, '../../.env.test') });
+
+export interface TestUser {
+  username: string;
+  password: string;
+  email?: string;
+}
+
+export function getTestUser(): TestUser {
+  return {
+    username: process.env.TEST_USER_USERNAME || 'test_e2e_user',
+    password: process.env.TEST_USER_PASSWORD || 'test_password',
+    email: process.env.TEST_USER_EMAIL,
+  };
+}
+
+export function getTestApiBaseUrl(): string {
+  return process.env.TEST_API_BASE_URL || 'http://localhost:8000';
+}
+
+/**
+ * Login via UI
+ * Customize this function based on your login page structure
+ */
+export async function loginViaUI(page: Page, user?: TestUser): Promise<void> {
+  const { username, password } = user || getTestUser();
+  
+  // Navigate to login page
+  await page.goto('/login');
+  
+  // Fill login form - adjust selectors based on your UI
+  await page.fill('input[name="username"], input[type="text"]', username);
+  await page.fill('input[name="password"], input[type="password"]', password);
+  
+  // Submit login
+  await page.click('button[type="submit"]');
+  
+  // Wait for navigation after login
+  await page.waitForURL('**/*', { timeout: 10000 });
+}
+
+/**
+ * Login via API and set cookies/tokens
+ */
+export async function loginViaAPI(page: Page, user?: TestUser): Promise<string> {
+  const { username, password } = user || getTestUser();
+  const apiBaseUrl = getTestApiBaseUrl();
+  
+  // Make API login request
+  const response = await page.request.post(`${apiBaseUrl}/api/v1/auth/login`, {
+    form: {
+      username,
+      password,
+    },
+  });
+  
+  if (!response.ok()) {
+    throw new Error(`Login failed: ${response.status()}`);
+  }
+  
+  const data = await response.json();
+  const token = data.access_token;
+  
+  // Store token in localStorage or as cookie based on your auth mechanism
+  await page.evaluate((t) => {
+    localStorage.setItem('access_token', t);
+  }, token);
+  
+  return token;
+}
+
+/**
+ * Logout the current user
+ */
+export async function logout(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    localStorage.removeItem('access_token');
+  });
+  await page.context().clearCookies();
+}
+
+/**
+ * Generate a unique test identifier
+ * Use this for test data isolation
+ */
+export function generateTestId(prefix = 'e2e'): string {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 8);
+  return `${prefix}_${timestamp}_${random}`;
+}
+EOF
+    echo -e "${GREEN}✓ 创建 $helpers_dir/auth.ts${NC}"
+}
+
+create_env_test_example() {
+    local frontend_path="$1"
+    local has_mysql="$2"
+    local has_oss="$3"
+    local target_file="$frontend_path/.env.test.example"
+    if ! should_overwrite_file "$target_file"; then
+        return 0
+    fi
+    
+    cat << 'EOF' > "$target_file"
+# E2E Test Environment Configuration
+# Copy this file to .env.test and fill in actual values
+
+# Test API Base URL
+TEST_API_BASE_URL=http://localhost:8000
+
+# Test User Credentials (create a dedicated test user)
+TEST_USER_USERNAME=test_e2e_user
+TEST_USER_PASSWORD=test_password
+TEST_USER_EMAIL=test@example.com
+
+EOF
+
+    if [ "$has_mysql" = "yes" ]; then
+        cat << 'EOF' >> "$target_file"
+# MySQL Database Configuration (for direct verification)
+TEST_DB_HOST=localhost
+TEST_DB_PORT=3306
+TEST_DB_USER=root
+TEST_DB_PASSWORD=
+TEST_DB_NAME=factory_explorer_test
+
+EOF
+    fi
+    
+    if [ "$has_oss" = "yes" ]; then
+        cat << 'EOF' >> "$target_file"
+# Alibaba OSS Configuration (for upload verification)
+TEST_OSS_REGION=oss-cn-hangzhou
+TEST_OSS_ACCESS_KEY_ID=
+TEST_OSS_ACCESS_KEY_SECRET=
+TEST_OSS_BUCKET=
+TEST_OSS_ENDPOINT=
+
+EOF
+    fi
+    
+    echo -e "${GREEN}✓ 创建 $target_file${NC}"
+}
+
+update_playwright_config() {
+    local frontend_path="$1"
+    local has_mysql="$2"
+    local has_oss="$3"
+    local config_file="$frontend_path/playwright.config.ts"
+    local manager
+    local web_command
+    manager=$(detect_package_manager)
+    case "$manager" in
+        pnpm) web_command="pnpm dev" ;;
+        yarn) web_command="yarn dev" ;;
+        *) web_command="npm run dev" ;;
+    esac
+    
+    local allow_config_update=true
+    if [ -f "$config_file" ]; then
+        if ! prompt_yes_no "检测到 $config_file 已存在，是否覆盖?" "n"; then
+            echo -e "${YELLOW}⏭️ 已跳过 $config_file${NC}"
+            allow_config_update=false
+        fi
+    fi
+
+    # If playwright config doesn't exist, create a basic one
+    if [ "$allow_config_update" = true ] && [ ! -f "$config_file" ]; then
+        cat << 'EOF' > "$config_file"
+import { defineConfig, devices } from '@playwright/test';
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+
+// Load test environment
+dotenv.config({ path: path.resolve(__dirname, '.env.test') });
+
+export default defineConfig({
+  testDir: './tests/e2e',
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  reporter: 'html',
+  
+  globalSetup: './tests/e2e/global-setup.ts',
+  globalTeardown: './tests/e2e/global-teardown.ts',
+  
+  use: {
+    baseURL: process.env.TEST_BASE_URL || 'http://localhost:3000',
+    trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
+  },
+
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
+
+  webServer: {
+        command: '__WEB_COMMAND__',
+    url: 'http://localhost:3000',
+    reuseExistingServer: !process.env.CI,
+    timeout: 120 * 1000,
+  },
+});
+EOF
+                sed -i "s|__WEB_COMMAND__|${web_command}|" "$config_file"
+        echo -e "${GREEN}✓ 创建 $config_file${NC}"
+        else
+            if [ "$allow_config_update" = true ]; then
+                if grep -q "command: 'pnpm dev'" "$config_file" || grep -q 'command: "pnpm dev"' "$config_file"; then
+                    if [ "$manager" != "pnpm" ]; then
+                        sed -i "s/command: 'pnpm dev'/command: '${web_command//\//\\/}'/" "$config_file"
+                        sed -i "s/command: \"pnpm dev\"/command: \"${web_command//\//\\/}\"/" "$config_file"
+                    fi
+                fi
+                if ! grep -q "globalSetup:" "$config_file" || ! grep -q "globalTeardown:" "$config_file"; then
+                    awk -v add_setup="$(grep -q "globalSetup:" "$config_file" && echo 0 || echo 1)" \
+                        -v add_teardown="$(grep -q "globalTeardown:" "$config_file" && echo 0 || echo 1)" \
+                        'BEGIN{inserted=0}
+                        /^[ \t]*reporter:/ && !inserted {print; if (add_setup==1) print "  globalSetup: '\''./tests/e2e/global-setup.ts'\'',"; if (add_teardown==1) print "  globalTeardown: '\''./tests/e2e/global-teardown.ts'\'',"; inserted=1; next}
+                        /^[ \t]*workers:/ && !inserted {print; if (add_setup==1) print "  globalSetup: '\''./tests/e2e/global-setup.ts'\'',"; if (add_teardown==1) print "  globalTeardown: '\''./tests/e2e/global-teardown.ts'\'',"; inserted=1; next}
+                        /^[ \t]*retries:/ && !inserted {print; if (add_setup==1) print "  globalSetup: '\''./tests/e2e/global-setup.ts'\'',"; if (add_teardown==1) print "  globalTeardown: '\''./tests/e2e/global-teardown.ts'\'',"; inserted=1; next}
+                        /^[ \t]*fullyParallel:/ && !inserted {print; if (add_setup==1) print "  globalSetup: '\''./tests/e2e/global-setup.ts'\'',"; if (add_teardown==1) print "  globalTeardown: '\''./tests/e2e/global-teardown.ts'\'',"; inserted=1; next}
+                        {print}' "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
+                fi
+            fi
+        fi
+    
+    # Create global setup file
+    local setup_file="$frontend_path/tests/e2e/global-setup.ts"
+    if should_overwrite_file "$setup_file"; then
+        cat << 'EOF' > "$setup_file"
+/**
+ * Global setup for E2E tests
+ * Runs once before all tests
+ */
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+
+// Load test environment
+dotenv.config({ path: path.resolve(__dirname, '../../.env.test') });
+
+async function globalSetup() {
+  console.log('\\n🚀 E2E Test Suite Starting...');
+  console.log(`   API Base URL: ${process.env.TEST_API_BASE_URL || 'http://localhost:8000'}`);
+  console.log(`   Frontend URL: ${process.env.TEST_BASE_URL || 'http://localhost:3000'}`);
+  
+  // Add any global setup logic here:
+  // - Seed test database
+  // - Create test user
+  // - Setup test fixtures
+}
+
+export default globalSetup;
+EOF
+    fi
+    
+        # Create global teardown file
+        if [ "$has_mysql" = "yes" ]; then
+            local teardown_file="$frontend_path/tests/e2e/global-teardown.ts"
+            if should_overwrite_file "$teardown_file"; then
+                cat << 'EOF' > "$teardown_file"
+/**
+ * Global teardown for E2E tests
+ * Runs once after all tests complete
+ */
+import { closeConnection, cleanupByPrefix } from './helpers/db';
+
+async function globalTeardown() {
+    console.log('\\n🧹 E2E Test Suite Cleanup...');
+  
+    try {
+        // Cleanup test data created during tests
+        // Uncomment and customize based on your tables
+        // await cleanupByPrefix('users', 'username', 'e2e_');
+        // await cleanupByPrefix('products', 'name', 'e2e_');
+    
+        console.log('   ✓ Test data cleaned up');
+    } catch (error) {
+        console.error('   ⚠ Cleanup error:', error);
+    } finally {
+        await closeConnection();
+        console.log('   ✓ Database connection closed');
+    }
+  
+    console.log('✅ E2E Test Suite Complete\\n');
+}
+
+export default globalTeardown;
+EOF
+        fi
+        else
+        local teardown_file="$frontend_path/tests/e2e/global-teardown.ts"
+        if should_overwrite_file "$teardown_file"; then
+            cat << 'EOF' > "$teardown_file"
+/**
+ * Global teardown for E2E tests
+ * Runs once after all tests complete
+ */
+async function globalTeardown() {
+    console.log('\\n🧹 E2E Test Suite Cleanup...');
+    console.log('✅ E2E Test Suite Complete\\n');
+}
+
+export default globalTeardown;
+EOF
+        fi
+        fi
+    
+    # Create example test file
+    if [ "$has_mysql" = "yes" ]; then
+        local example_file="$frontend_path/tests/e2e/example-with-verification.spec.ts"
+        if should_overwrite_file "$example_file"; then
+            cat << 'EOF' > "$example_file"
+/**
+ * Example E2E test with database and OSS verification
+ * Demonstrates the testing pattern: UI action -> DB verify -> OSS verify -> Cleanup
+ */
+import { test, expect } from '@playwright/test';
+import { loginViaUI, generateTestId, getTestUser } from './helpers/auth';
+import { verifyRecordExists, getRecord, deleteTestRecords } from './helpers/db';
+// import { verifyFileExists, deleteFile } from './helpers/oss';
+
+// Test data for this test suite
+const TEST_PREFIX = 'e2e_example';
+
+test.describe('Example with Verification', () => {
+  // Unique ID for test isolation
+  let testId: string;
+  
+  test.beforeEach(async ({ page }) => {
+    // Generate unique test ID for this test run
+    testId = generateTestId(TEST_PREFIX);
+    
+    // Login before each test
+    // await loginViaUI(page);
+  });
+  
+  test.afterEach(async () => {
+    // Cleanup test data after each test
+    // Uncomment and customize based on your data model
+    // await deleteTestRecords('your_table', { name: testId });
+  });
+
+  test('homepage loads correctly', async ({ page }) => {
+    await page.goto('/');
+    await expect(page).toHaveTitle(/.*/, { timeout: 10000 });
+  });
+
+  test.skip('submit form and verify in database', async ({ page }) => {
+    // 1. Navigate to form page
+    await page.goto('/your-form-page');
+    
+    // 2. Fill and submit form
+    await page.fill('input[name="name"]', testId);
+    await page.fill('input[name="description"]', 'Test description');
+    await page.click('button[type="submit"]');
+    
+    // 3. Wait for success indicator
+    await expect(page.locator('.success-message')).toBeVisible();
+    
+    // 4. Verify data was written to database
+    const exists = await verifyRecordExists('your_table', { name: testId });
+    expect(exists).toBe(true);
+    
+    // 5. Optionally get and verify record details
+    const record = await getRecord('your_table', { name: testId });
+    expect(record).not.toBeNull();
+    expect(record?.description).toBe('Test description');
+  });
+
+  test.skip('upload file and verify in OSS', async ({ page }) => {
+    // 1. Navigate to upload page
+    await page.goto('/upload');
+    
+    // 2. Upload file
+    const fileInput = page.locator('input[type="file"]');
+    await fileInput.setInputFiles({
+      name: `${testId}.txt`,
+      mimeType: 'text/plain',
+      buffer: Buffer.from('Test file content'),
+    });
+    
+    // 3. Submit upload
+    await page.click('button[type="submit"]');
+    
+    // 4. Wait for upload completion
+    await expect(page.locator('.upload-success')).toBeVisible();
+    
+    // 5. Verify file exists in OSS
+    // const ossPath = `uploads/${testId}.txt`;
+    // const exists = await verifyFileExists(ossPath);
+    // expect(exists).toBe(true);
+    
+    // 6. Cleanup: delete uploaded file
+    // await deleteFile(ossPath);
+  });
+});
+EOF
+    fi
+        else
+        local example_file="$frontend_path/tests/e2e/example-with-verification.spec.ts"
+        if should_overwrite_file "$example_file"; then
+            cat << 'EOF' > "$example_file"
+/**
+ * Example E2E test with verification template
+ * Demonstrates the testing pattern: UI action -> Verify -> Cleanup
+ */
+import { test, expect } from '@playwright/test';
+import { loginViaUI, generateTestId, getTestUser } from './helpers/auth';
+// import { verifyRecordExists, getRecord, deleteTestRecords } from './helpers/db';
+// import { verifyFileExists, deleteFile } from './helpers/oss';
+
+// Test data for this test suite
+const TEST_PREFIX = 'e2e_example';
+
+test.describe('Example with Verification', () => {
+    // Unique ID for test isolation
+    let testId: string;
+  
+    test.beforeEach(async ({ page }) => {
+        // Generate unique test ID for this test run
+        testId = generateTestId(TEST_PREFIX);
+    
+        // Login before each test
+        // await loginViaUI(page);
+    });
+  
+    test('homepage loads correctly', async ({ page }) => {
+        await page.goto('/');
+        await expect(page).toHaveTitle(/.*/, { timeout: 10000 });
+    });
+});
+EOF
+        fi
+        fi
+    echo -e "${GREEN}✓ 创建 E2E 测试示例和全局配置文件${NC}"
 }
 
 install_eslint_prettier() {
@@ -493,6 +1358,18 @@ init_frontend_stack() {
                 if ! has_playwright_dep; then
                     if prompt_yes_no "是否安装 Playwright (E2E)?" "y"; then
                         install_playwright
+                        # Offer E2E framework configuration
+                        if prompt_yes_no "是否配置 E2E 测试框架（DB/OSS 验证）?" "n"; then
+                            local has_mysql="no"
+                            local has_oss="no"
+                            if prompt_yes_no "  项目是否使用 MySQL 数据库?" "y"; then
+                                has_mysql="yes"
+                            fi
+                            if prompt_yes_no "  项目是否使用 OSS 文件存储?" "n"; then
+                                has_oss="yes"
+                            fi
+                            configure_e2e_framework "." "$has_mysql" "$has_oss"
+                        fi
                     fi
                 fi
                 if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
@@ -533,6 +1410,18 @@ init_frontend_stack() {
                 if ! has_playwright_dep; then
                     if prompt_yes_no "是否安装 Playwright (E2E)?" "y"; then
                         install_playwright
+                        # Offer E2E framework configuration for TypeScript projects
+                        if prompt_yes_no "是否配置 E2E 测试框架（DB/OSS 验证）?" "n"; then
+                            local has_mysql="no"
+                            local has_oss="no"
+                            if prompt_yes_no "  项目是否使用 MySQL 数据库?" "y"; then
+                                has_mysql="yes"
+                            fi
+                            if prompt_yes_no "  项目是否使用 OSS 文件存储?" "n"; then
+                                has_oss="yes"
+                            fi
+                            configure_e2e_framework "." "$has_mysql" "$has_oss"
+                        fi
                     fi
                 fi
                 if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
@@ -648,7 +1537,7 @@ init_backend_express() {
     mkdir -p "$backend_path"
     (cd "$backend_path" && {
         if [ ! -f "package.json" ]; then
-            npm init -y
+            init_package_json
         fi
         npm install express
         if ! has_pkg_dep "eslint" || ! has_pkg_dep "prettier"; then
@@ -875,7 +1764,7 @@ has_typescript_dep() {
 init_node_stack() {
     if [ ! -f "package.json" ]; then
         echo -e "${YELLOW}初始化 Node.js 项目...${NC}"
-        npm init -y
+        init_package_json
     fi
     if prompt_yes_no "是否设置 package.json 为 ES Module (type: module)?" "n"; then
         set_pkg_field_if_missing "type" "module"
@@ -885,7 +1774,7 @@ init_node_stack() {
 init_typescript_stack() {
     if [ ! -f "package.json" ]; then
         echo -e "${YELLOW}初始化 TypeScript 项目...${NC}"
-        npm init -y
+        init_package_json
     fi
     install_typescript_deps
     if [ ! -f "tsconfig.json" ]; then
@@ -1292,21 +2181,42 @@ case "$PROJECT_TYPE" in
         echo -e "${GREEN}✓ 项目克隆成功${NC}"
         ;;
     3)
-        echo ""
-        echo -e "${CYAN}请输入本地项目路径:${NC}"
-        read -p "项目路径: " LOCAL_PROJECT_PATH
+        echo -e "${YELLOW}🔎 正在检索可用项目目录...${NC}"
+        mapfile -t PROJECT_DIRS < <(find . -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | grep -vE '^(ralph-claude-code|\.claude|\.git|\.idea|\.vscode|node_modules)$' | sort)
 
-        if [ -z "$LOCAL_PROJECT_PATH" ]; then
-            echo -e "${RED}❌ 项目路径不能为空${NC}"
-            exit 1
+        if [ ${#PROJECT_DIRS[@]} -eq 0 ]; then
+            echo -e "${RED}❌ 当前目录下未找到可用项目目录${NC}"
+            echo -e "${CYAN}请输入本地项目路径:${NC}"
+            read -p "项目路径: " LOCAL_PROJECT_PATH
+            if [ ! -d "$LOCAL_PROJECT_PATH" ]; then
+                echo -e "${RED}❌ 目录不存在: $LOCAL_PROJECT_PATH${NC}"
+                exit 1
+            fi
+            PROJECT_DIR="$(cd "$LOCAL_PROJECT_PATH" && pwd)"
+        else
+            echo -e "${CYAN}请选择项目目录:${NC}"
+            for i in "${!PROJECT_DIRS[@]}"; do
+                echo "  $((i+1))) ${PROJECT_DIRS[$i]}"
+            done
+            echo "  0) 输入自定义路径"
+
+            read -p "请输入序号: " SELECT_IDX
+            
+            if [ "$SELECT_IDX" -eq 0 ]; then
+                 read -p "请输入项目完整路径: " LOCAL_PROJECT_PATH
+                 if [ ! -d "$LOCAL_PROJECT_PATH" ]; then
+                    echo -e "${RED}❌ 目录不存在: $LOCAL_PROJECT_PATH${NC}"
+                    exit 1
+                 fi
+                 PROJECT_DIR="$(cd "$LOCAL_PROJECT_PATH" && pwd)"
+            elif [[ "$SELECT_IDX" =~ ^[0-9]+$ ]] && [ "$SELECT_IDX" -ge 1 ] && [ "$SELECT_IDX" -le ${#PROJECT_DIRS[@]} ]; then
+                 PROJECT_DIR="$(pwd)/${PROJECT_DIRS[$((SELECT_IDX-1))]}"
+            else
+                 echo -e "${RED}❌ 无效选择${NC}"
+                 exit 1
+            fi
         fi
 
-        if [ ! -d "$LOCAL_PROJECT_PATH" ]; then
-            echo -e "${RED}❌ 本地目录不存在: $LOCAL_PROJECT_PATH${NC}"
-            exit 1
-        fi
-
-        PROJECT_DIR="$(cd "$LOCAL_PROJECT_PATH" && pwd)"
         PROJECT_NAME="$(basename "$PROJECT_DIR")"
         echo -e "${GREEN}✓ 使用本地项目目录: $PROJECT_DIR${NC}"
         ;;
@@ -1346,297 +2256,337 @@ esac
 # ==========================================
 echo -e "\n${YELLOW}[Step 4] 项目结构配置...${NC}"
 
-cd "$PROJECT_DIR"
-echo -e "  工作目录: ${BLUE}$PROJECT_DIR${NC}"
+FRONTEND_DIR=""
+PLAYWRIGHT_CONFIG_DIR="."
+TESTS_DIR="tests/e2e"
+DEFAULT_PORT="3000"
 
-echo ""
-echo -e "${BLUE}请选择你的项目结构:${NC}"
-echo -e "  1) 单体项目 (所有代码在根目录)"
-echo -e "  2) Monorepo - 前端在 frontend/"
-echo -e "  3) Monorepo - 前端在 client/"
-echo -e "  4) Monorepo - 前端在 web/"
-echo -e "  5) 自定义前端目录"
-echo ""
-read -p "请输入选项 [1-5] (默认: 1): " PROJECT_STRUCTURE
+if prompt_yes_no "是否执行 Step 4（项目结构配置）?" "y"; then
+    cd "$PROJECT_DIR"
+    echo -e "  工作目录: ${BLUE}$PROJECT_DIR${NC}"
 
-case "$PROJECT_STRUCTURE" in
-    2)
-        FRONTEND_DIR="frontend"
-        ;;
-    3)
-        FRONTEND_DIR="client"
-        ;;
-    4)
-        FRONTEND_DIR="web"
-        ;;
-    5)
-        read -p "请输入前端目录名称: " CUSTOM_DIR
-        FRONTEND_DIR="${CUSTOM_DIR:-frontend}"
-        ;;
-    *)
-        FRONTEND_DIR=""
-        ;;
-esac
+    echo ""
+    echo -e "${BLUE}请选择你的项目结构:${NC}"
+    echo -e "  1) 单体项目 (所有代码在根目录)"
+    echo -e "  2) Monorepo - 前端在 frontend/"
+    echo -e "  3) Monorepo - 前端在 client/"
+    echo -e "  4) Monorepo - 前端在 web/"
+    echo -e "  5) 自定义前端目录"
+    echo ""
+    read -p "请输入选项 [1-5] (默认: 1): " PROJECT_STRUCTURE
 
-# 设置文件路径
-if [ -n "$FRONTEND_DIR" ]; then
-    PLAYWRIGHT_CONFIG_DIR="$FRONTEND_DIR"
-    TESTS_DIR="$FRONTEND_DIR/tests/e2e"
-    echo -e "${GREEN}✓ Monorepo 模式: 前端目录 = $FRONTEND_DIR${NC}"
+    case "$PROJECT_STRUCTURE" in
+        2)
+            FRONTEND_DIR="frontend"
+            ;;
+        3)
+            FRONTEND_DIR="client"
+            ;;
+        4)
+            FRONTEND_DIR="web"
+            ;;
+        5)
+            read -p "请输入前端目录名称: " CUSTOM_DIR
+            FRONTEND_DIR="${CUSTOM_DIR:-frontend}"
+            ;;
+        *)
+            FRONTEND_DIR=""
+            ;;
+    esac
+
+    # 设置文件路径
+    if [ -n "$FRONTEND_DIR" ]; then
+        PLAYWRIGHT_CONFIG_DIR="$FRONTEND_DIR"
+        TESTS_DIR="$FRONTEND_DIR/tests/e2e"
+        echo -e "${GREEN}✓ Monorepo 模式: 前端目录 = $FRONTEND_DIR${NC}"
+    else
+        PLAYWRIGHT_CONFIG_DIR="."
+        TESTS_DIR="tests/e2e"
+        echo -e "${GREEN}✓ 单体项目模式${NC}"
+    fi
+
+    echo ""
+    echo -e "${BLUE}请选择默认端口:${NC}"
+    echo -e "  1) 3000 (Next.js / Express / 通用)"
+    echo -e "  2) 5173 (Vite)"
+    echo -e "  3) 8080 (Vue CLI / 通用)"
+    echo -e "  4) 4200 (Angular)"
+    echo -e "  5) 自定义端口"
+    echo ""
+    read -p "请输入选项 [1-5] (默认: 1): " PORT_CHOICE
+
+    case "$PORT_CHOICE" in
+        2)
+            DEFAULT_PORT="5173"
+            ;;
+        3)
+            DEFAULT_PORT="8080"
+            ;;
+        4)
+            DEFAULT_PORT="4200"
+            ;;
+        5)
+            read -p "请输入端口号: " CUSTOM_PORT
+            DEFAULT_PORT="${CUSTOM_PORT:-3000}"
+            ;;
+        *)
+            DEFAULT_PORT="3000"
+            ;;
+    esac
+
+    echo -e "${GREEN}✓ 默认端口: $DEFAULT_PORT${NC}"
 else
-    PLAYWRIGHT_CONFIG_DIR="."
-    TESTS_DIR="tests/e2e"
-    echo -e "${GREEN}✓ 单体项目模式${NC}"
+    cd "$PROJECT_DIR"
+    echo -e "${YELLOW}⏭️ 已跳过 Step 4，使用默认项目结构与端口${NC}"
 fi
-
-echo ""
-echo -e "${BLUE}请选择默认端口:${NC}"
-echo -e "  1) 3000 (Next.js / Express / 通用)"
-echo -e "  2) 5173 (Vite)"
-echo -e "  3) 8080 (Vue CLI / 通用)"
-echo -e "  4) 4200 (Angular)"
-echo -e "  5) 自定义端口"
-echo ""
-read -p "请输入选项 [1-5] (默认: 1): " PORT_CHOICE
-
-case "$PORT_CHOICE" in
-    2)
-        DEFAULT_PORT="5173"
-        ;;
-    3)
-        DEFAULT_PORT="8080"
-        ;;
-    4)
-        DEFAULT_PORT="4200"
-        ;;
-    5)
-        read -p "请输入端口号: " CUSTOM_PORT
-        DEFAULT_PORT="${CUSTOM_PORT:-3000}"
-        ;;
-    *)
-        DEFAULT_PORT="3000"
-        ;;
-esac
-
-echo -e "${GREEN}✓ 默认端口: $DEFAULT_PORT${NC}"
 
 # ==========================================
 # Step 5: 技术栈初始化
 # ==========================================
 echo -e "\n${YELLOW}[Step 5] 技术栈初始化...${NC}"
 
-FRONTEND_PATH="$PROJECT_DIR"
-if [ -n "$FRONTEND_DIR" ]; then
-    FRONTEND_PATH="$PROJECT_DIR/$FRONTEND_DIR"
-    mkdir -p "$FRONTEND_PATH"
-fi
+if prompt_yes_no "是否执行 Step 5（技术栈初始化）?" "y"; then
+    FRONTEND_PATH="$PROJECT_DIR"
+    if [ -n "$FRONTEND_DIR" ]; then
+        FRONTEND_PATH="$PROJECT_DIR/$FRONTEND_DIR"
+        mkdir -p "$FRONTEND_PATH"
+    fi
 
-BACKEND_DIR=""
-BACKEND_REQUESTED=false
-BACKEND_INITIALIZED=false
-BACKEND_STACK=""
-BACKEND_HANDLED=false
+    BACKEND_DIR=""
+    BACKEND_REQUESTED=false
+    BACKEND_INITIALIZED=false
+    BACKEND_STACK=""
+    BACKEND_HANDLED=false
 
-if prompt_yes_no "是否有后端?" "n"; then
-    BACKEND_REQUESTED=true
-    read -p "后端目录名 (默认: backend): " BACKEND_DIR_INPUT
-    BACKEND_DIR="${BACKEND_DIR_INPUT:-backend}"
-else
-    if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
-        for candidate in backend server api; do
-            if [ -d "$PROJECT_DIR/$candidate" ]; then
-                if prompt_yes_no "检测到后端目录: $candidate，是否使用?" "y"; then
-                    BACKEND_DIR="$candidate"
-                    BACKEND_REQUESTED=true
-                    break
+    if prompt_yes_no "是否有后端?" "n"; then
+        BACKEND_REQUESTED=true
+        read -p "后端目录名 (默认: backend): " BACKEND_DIR_INPUT
+        BACKEND_DIR="${BACKEND_DIR_INPUT:-backend}"
+    else
+        if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
+            for candidate in backend server api; do
+                if [ -d "$PROJECT_DIR/$candidate" ]; then
+                    if prompt_yes_no "检测到后端目录: $candidate，是否使用?" "y"; then
+                        BACKEND_DIR="$candidate"
+                        BACKEND_REQUESTED=true
+                        break
+                    fi
                 fi
-            fi
-        done
-        if [ "$BACKEND_REQUESTED" = false ]; then
-            if prompt_yes_no "未检测到后端目录，是否初始化后端?" "n"; then
-                BACKEND_REQUESTED=true
-                read -p "后端目录名 (默认: backend): " BACKEND_DIR_INPUT
-                BACKEND_DIR="${BACKEND_DIR_INPUT:-backend}"
+            done
+            if [ "$BACKEND_REQUESTED" = false ]; then
+                if prompt_yes_no "未检测到后端目录，是否初始化后端?" "n"; then
+                    BACKEND_REQUESTED=true
+                    read -p "后端目录名 (默认: backend): " BACKEND_DIR_INPUT
+                    BACKEND_DIR="${BACKEND_DIR_INPUT:-backend}"
+                fi
             fi
         fi
     fi
-fi
 
-HAS_BACKEND=false
-BACKEND_PATH=""
-if [ -n "$BACKEND_DIR" ]; then
-    BACKEND_PATH="$PROJECT_DIR/$BACKEND_DIR"
-    if [ -d "$BACKEND_PATH" ]; then
-        HAS_BACKEND=true
+    HAS_BACKEND=false
+    BACKEND_PATH=""
+    if [ -n "$BACKEND_DIR" ]; then
+        BACKEND_PATH="$PROJECT_DIR/$BACKEND_DIR"
+        if [ -d "$BACKEND_PATH" ]; then
+            HAS_BACKEND=true
+        fi
     fi
-fi
 
-if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
-    HAS_STACK=false
+    if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
+        HAS_STACK=false
 
-    if [ -f "$FRONTEND_PATH/package.json" ]; then
-        HAS_STACK=true
-        echo -e "${GREEN}✓ 检测到 Node.js 项目${NC}"
-        (cd "$FRONTEND_PATH" && {
-            if prompt_yes_no "是否安装前端依赖?" "y"; then
-                install_node_dependencies
-            fi
+        if [ -f "$FRONTEND_PATH/package.json" ]; then
+            HAS_STACK=true
+            echo -e "${GREEN}✓ 检测到 Node.js 项目${NC}"
+            (cd "$FRONTEND_PATH" && {
+                if prompt_yes_no "是否安装前端依赖?" "y"; then
+                    install_node_dependencies
+                fi
 
-            if prompt_yes_no "是否安装 ESLint + Prettier?" "n"; then
-                install_eslint_prettier
-            fi
+                if prompt_yes_no "是否安装 ESLint + Prettier?" "n"; then
+                    install_eslint_prettier
+                fi
 
-            if [ -f "tsconfig.json" ] || has_typescript_dep; then
-                echo -e "${GREEN}✓ 检测到 TypeScript 配置${NC}"
-                if ! has_typescript_dep; then
-                    if prompt_yes_no "未检测到 typescript 依赖，是否安装?" "y"; then
+                if [ -f "tsconfig.json" ] || has_typescript_dep; then
+                    echo -e "${GREEN}✓ 检测到 TypeScript 配置${NC}"
+                    if ! has_typescript_dep; then
+                        if prompt_yes_no "未检测到 typescript 依赖，是否安装?" "y"; then
+                            install_typescript_deps
+                        fi
+                    fi
+                else
+                    if prompt_yes_no "是否为 TypeScript 项目?" "n"; then
                         install_typescript_deps
                     fi
                 fi
-            else
-                if prompt_yes_no "是否为 TypeScript 项目?" "n"; then
-                    install_typescript_deps
+
+                echo -e "${BLUE}选择单测框架:${NC}"
+                echo -e "  1) Vitest"
+                echo -e "  2) Jest"
+                echo -e "  3) 跳过"
+                UNIT_RUNNER=""
+                while true; do
+                    read -p "请输入选项 [1-3]: " UNIT_CHOICE
+                    case "$UNIT_CHOICE" in
+                        1) install_vitest; UNIT_RUNNER="vitest"; break ;;
+                        2) install_jest; UNIT_RUNNER="jest"; break ;;
+                        3) break ;;
+                        *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
+                    esac
+                done
+
+                if has_playwright_dep; then
+                    if prompt_yes_no "是否安装 Playwright 浏览器?" "y"; then
+                        npx playwright install
+                    fi
+                else
+                    if prompt_yes_no "未检测到 @playwright/test，是否安装?" "y"; then
+                        install_playwright
+                    fi
                 fi
+
+                if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
+                    setup_node_scripts "$UNIT_RUNNER"
+                fi
+            })
+        fi
+
+        if [ -n "$BACKEND_PATH" ] && [ -d "$BACKEND_PATH" ]; then
+            if [ -f "$BACKEND_PATH/pyproject.toml" ] || [ -f "$BACKEND_PATH/requirements.txt" ]; then
+                HAS_STACK=true
+                echo -e "${GREEN}✓ 检测到 Python 后端${NC}"
+                (cd "$BACKEND_PATH" && {
+                    init_python_stack "no"
+                    setup_python_tooling
+                })
+                BACKEND_HANDLED=true
             fi
 
-            echo -e "${BLUE}选择单测框架:${NC}"
-            echo -e "  1) Vitest"
-            echo -e "  2) Jest"
-            echo -e "  3) 跳过"
-            UNIT_RUNNER=""
-            while true; do
-                read -p "请输入选项 [1-3]: " UNIT_CHOICE
-                case "$UNIT_CHOICE" in
-                    1) install_vitest; UNIT_RUNNER="vitest"; break ;;
-                    2) install_jest; UNIT_RUNNER="jest"; break ;;
-                    3) break ;;
-                    *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
-                esac
-            done
-
-            if has_playwright_dep; then
-                if prompt_yes_no "是否安装 Playwright 浏览器?" "y"; then
-                    npx playwright install
-                fi
-            else
-                if prompt_yes_no "未检测到 @playwright/test，是否安装?" "y"; then
-                    install_playwright
-                fi
+            if [ -f "$BACKEND_PATH/go.mod" ]; then
+                HAS_STACK=true
+                echo -e "${GREEN}✓ 检测到 Go 后端${NC}"
+                (cd "$BACKEND_PATH" && init_go_stack)
+                BACKEND_HANDLED=true
             fi
 
-            if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
-                setup_node_scripts "$UNIT_RUNNER"
+            if [ -f "$BACKEND_PATH/Cargo.toml" ]; then
+                HAS_STACK=true
+                echo -e "${GREEN}✓ 检测到 Rust 后端${NC}"
+                (cd "$BACKEND_PATH" && init_rust_stack)
+                BACKEND_HANDLED=true
             fi
-        })
-    fi
-
-    if [ -n "$BACKEND_PATH" ] && [ -d "$BACKEND_PATH" ]; then
-        if [ -f "$BACKEND_PATH/pyproject.toml" ] || [ -f "$BACKEND_PATH/requirements.txt" ]; then
-            HAS_STACK=true
-            echo -e "${GREEN}✓ 检测到 Python 后端${NC}"
-            (cd "$BACKEND_PATH" && {
+        else
+            if [ -f "pyproject.toml" ] || [ -f "requirements.txt" ]; then
+                HAS_STACK=true
+                echo -e "${GREEN}✓ 检测到 Python 项目${NC}"
                 init_python_stack "no"
                 setup_python_tooling
-            })
-            BACKEND_HANDLED=true
-        fi
-
-        if [ -f "$BACKEND_PATH/go.mod" ]; then
-            HAS_STACK=true
-            echo -e "${GREEN}✓ 检测到 Go 后端${NC}"
-            (cd "$BACKEND_PATH" && init_go_stack)
-            BACKEND_HANDLED=true
-        fi
-
-        if [ -f "$BACKEND_PATH/Cargo.toml" ]; then
-            HAS_STACK=true
-            echo -e "${GREEN}✓ 检测到 Rust 后端${NC}"
-            (cd "$BACKEND_PATH" && init_rust_stack)
-            BACKEND_HANDLED=true
-        fi
-    else
-        if [ -f "pyproject.toml" ] || [ -f "requirements.txt" ]; then
-            HAS_STACK=true
-            echo -e "${GREEN}✓ 检测到 Python 项目${NC}"
-            init_python_stack "no"
-            setup_python_tooling
-        fi
-
-        if [ -f "go.mod" ]; then
-            HAS_STACK=true
-            echo -e "${GREEN}✓ 检测到 Go 项目${NC}"
-            init_go_stack
-        fi
-
-        if [ -f "Cargo.toml" ]; then
-            HAS_STACK=true
-            echo -e "${GREEN}✓ 检测到 Rust 项目${NC}"
-            init_rust_stack
-        fi
-    fi
-
-    if [ "$HAS_STACK" = false ]; then
-        echo -e "${YELLOW}⚠️ 未检测到已知技术栈${NC}"
-        echo -e "${BLUE}请选择要初始化的技术栈:${NC}"
-        echo -e "  1) Node.js (JavaScript)"
-        echo -e "  2) TypeScript"
-        echo -e "  3) Python"
-        echo -e "  4) Go"
-        echo -e "  5) Rust"
-        echo -e "  6) 自定义命令"
-        echo -e "  7) 跳过"
-        while true; do
-            read -p "请输入选项 [1-7]: " STACK_CHOICE
-            case "$STACK_CHOICE" in
-                1) init_node_stack; break ;;
-                2) init_typescript_stack; break ;;
-                3) init_python_stack; break ;;
-                4) init_go_stack; break ;;
-                5) init_rust_stack; break ;;
-                6) init_custom_stack; break ;;
-                7) echo -e "${YELLOW}已跳过技术栈初始化${NC}"; break ;;
-                *) echo -e "${YELLOW}请输入 1-7 的有效选项${NC}" ;;
-            esac
-        done
-    fi
-
-    if [ "$HAS_BACKEND" = true ] && [ "$BACKEND_HANDLED" = false ]; then
-        if [ -f "$BACKEND_PATH/pyproject.toml" ] || [ -f "$BACKEND_PATH/requirements.txt" ]; then
-            echo -e "${GREEN}✓ 检测到 Python 后端${NC}"
-            (cd "$BACKEND_PATH" && init_python_stack "no")
-        elif [ -f "$BACKEND_PATH/package.json" ]; then
-            echo -e "${GREEN}✓ 检测到 Node.js 后端${NC}"
-            if prompt_yes_no "是否安装后端依赖?" "y"; then
-                (cd "$BACKEND_PATH" && install_node_dependencies)
             fi
-            if prompt_yes_no "是否安装 ESLint + Prettier?" "n"; then
-                (cd "$BACKEND_PATH" && install_eslint_prettier)
+
+            if [ -f "go.mod" ]; then
+                HAS_STACK=true
+                echo -e "${GREEN}✓ 检测到 Go 项目${NC}"
+                init_go_stack
             fi
-            echo -e "${BLUE}选择后端单测框架:${NC}"
-            echo -e "  1) Vitest"
-            echo -e "  2) Jest"
-            echo -e "  3) 跳过"
-            UNIT_RUNNER=""
+
+            if [ -f "Cargo.toml" ]; then
+                HAS_STACK=true
+                echo -e "${GREEN}✓ 检测到 Rust 项目${NC}"
+                init_rust_stack
+            fi
+        fi
+
+        if [ "$HAS_STACK" = false ]; then
+            echo -e "${YELLOW}⚠️ 未检测到已知技术栈${NC}"
+            echo -e "${BLUE}请选择要初始化的技术栈:${NC}"
+            echo -e "  1) Node.js (JavaScript)"
+            echo -e "  2) TypeScript"
+            echo -e "  3) Python"
+            echo -e "  4) Go"
+            echo -e "  5) Rust"
+            echo -e "  6) 自定义命令"
+            echo -e "  7) 跳过"
             while true; do
-                read -p "请输入选项 [1-3]: " UNIT_CHOICE
-                case "$UNIT_CHOICE" in
-                    1) (cd "$BACKEND_PATH" && install_vitest); UNIT_RUNNER="vitest"; break ;;
-                    2) (cd "$BACKEND_PATH" && install_jest); UNIT_RUNNER="jest"; break ;;
-                    3) break ;;
-                    *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
+                read -p "请输入选项 [1-7]: " STACK_CHOICE
+                case "$STACK_CHOICE" in
+                    1) init_node_stack; break ;;
+                    2) init_typescript_stack; break ;;
+                    3) init_python_stack; break ;;
+                    4) init_go_stack; break ;;
+                    5) init_rust_stack; break ;;
+                    6) init_custom_stack; break ;;
+                    7) echo -e "${YELLOW}已跳过技术栈初始化${NC}"; break ;;
+                    *) echo -e "${YELLOW}请输入 1-7 的有效选项${NC}" ;;
                 esac
             done
-            if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
-                (cd "$BACKEND_PATH" && setup_node_scripts "$UNIT_RUNNER")
+        fi
+
+        if [ "$HAS_BACKEND" = true ] && [ "$BACKEND_HANDLED" = false ]; then
+            if [ -f "$BACKEND_PATH/pyproject.toml" ] || [ -f "$BACKEND_PATH/requirements.txt" ]; then
+                echo -e "${GREEN}✓ 检测到 Python 后端${NC}"
+                (cd "$BACKEND_PATH" && init_python_stack "no")
+            elif [ -f "$BACKEND_PATH/package.json" ]; then
+                echo -e "${GREEN}✓ 检测到 Node.js 后端${NC}"
+                if prompt_yes_no "是否安装后端依赖?" "y"; then
+                    (cd "$BACKEND_PATH" && install_node_dependencies)
+                fi
+                if prompt_yes_no "是否安装 ESLint + Prettier?" "n"; then
+                    (cd "$BACKEND_PATH" && install_eslint_prettier)
+                fi
+                echo -e "${BLUE}选择后端单测框架:${NC}"
+                echo -e "  1) Vitest"
+                echo -e "  2) Jest"
+                echo -e "  3) 跳过"
+                UNIT_RUNNER=""
+                while true; do
+                    read -p "请输入选项 [1-3]: " UNIT_CHOICE
+                    case "$UNIT_CHOICE" in
+                        1) (cd "$BACKEND_PATH" && install_vitest); UNIT_RUNNER="vitest"; break ;;
+                        2) (cd "$BACKEND_PATH" && install_jest); UNIT_RUNNER="jest"; break ;;
+                        3) break ;;
+                        *) echo -e "${YELLOW}请输入 1-3 的有效选项${NC}" ;;
+                    esac
+                done
+                if prompt_yes_no "是否补齐 package.json scripts?" "y"; then
+                    (cd "$BACKEND_PATH" && setup_node_scripts "$UNIT_RUNNER")
+                fi
+            elif [ -f "$BACKEND_PATH/go.mod" ]; then
+                echo -e "${GREEN}✓ 检测到 Go 后端${NC}"
+                (cd "$BACKEND_PATH" && init_go_stack)
+            elif [ -f "$BACKEND_PATH/Cargo.toml" ]; then
+                echo -e "${GREEN}✓ 检测到 Rust 后端${NC}"
+                (cd "$BACKEND_PATH" && init_rust_stack)
+            else
+                if prompt_yes_no "未检测到后端配置，是否初始化后端?" "n"; then
+                    echo -e "${BLUE}请选择后端技术栈:${NC}"
+                    echo -e "  1) FastAPI"
+                    echo -e "  2) Flask"
+                    echo -e "  3) Django"
+                    echo -e "  4) Express"
+                    echo -e "  5) NestJS"
+                    echo -e "  6) Go (Gin)"
+                    echo -e "  7) Rust (Axum)"
+                    echo -e "  8) 自定义命令"
+                    echo -e "  9) 跳过"
+                    while true; do
+                        read -p "请输入选项 [1-9]: " BACKEND_CHOICE
+                        case "$BACKEND_CHOICE" in
+                            1) init_backend_stack "$BACKEND_PATH" fastapi; break ;;
+                            2) init_backend_stack "$BACKEND_PATH" flask; break ;;
+                            3) init_backend_stack "$BACKEND_PATH" django; break ;;
+                            4) init_backend_stack "$BACKEND_PATH" express; break ;;
+                            5) init_backend_stack "$BACKEND_PATH" nest; break ;;
+                            6) init_backend_stack "$BACKEND_PATH" gin; break ;;
+                            7) init_backend_stack "$BACKEND_PATH" axum; break ;;
+                            8) init_backend_stack "$BACKEND_PATH" custom; break ;;
+                            9) echo -e "${YELLOW}已跳过后端初始化${NC}"; break ;;
+                            *) echo -e "${YELLOW}请输入 1-9 的有效选项${NC}" ;;
+                        esac
+                    done
+                fi
             fi
-        elif [ -f "$BACKEND_PATH/go.mod" ]; then
-            echo -e "${GREEN}✓ 检测到 Go 后端${NC}"
-            (cd "$BACKEND_PATH" && init_go_stack)
-        elif [ -f "$BACKEND_PATH/Cargo.toml" ]; then
-            echo -e "${GREEN}✓ 检测到 Rust 后端${NC}"
-            (cd "$BACKEND_PATH" && init_rust_stack)
-        else
-            if prompt_yes_no "未检测到后端配置，是否初始化后端?" "n"; then
+        elif [ "$BACKEND_REQUESTED" = true ]; then
+            if prompt_yes_no "是否需要初始化后端?" "n"; then
                 echo -e "${BLUE}请选择后端技术栈:${NC}"
                 echo -e "  1) FastAPI"
                 echo -e "  2) Flask"
@@ -1664,7 +2614,23 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
                 done
             fi
         fi
-    elif [ "$BACKEND_REQUESTED" = true ]; then
+    else
+        echo -e "${BLUE}请选择前端技术栈:${NC}"
+        echo -e "  1) Node.js (JavaScript)"
+        echo -e "  2) TypeScript"
+        echo -e "  3) 自定义命令"
+        echo -e "  4) 跳过前端"
+        while true; do
+            read -p "请输入选项 [1-4]: " FRONT_CHOICE
+            case "$FRONT_CHOICE" in
+                1) init_frontend_stack "$FRONTEND_PATH" node; break ;;
+                2) init_frontend_stack "$FRONTEND_PATH" ts; break ;;
+                3) init_frontend_stack "$FRONTEND_PATH" custom; break ;;
+                4) init_frontend_stack "$FRONTEND_PATH" skip; break ;;
+                *) echo -e "${YELLOW}请输入 1-4 的有效选项${NC}" ;;
+            esac
+        done
+
         if prompt_yes_no "是否需要初始化后端?" "n"; then
             echo -e "${BLUE}请选择后端技术栈:${NC}"
             echo -e "  1) FastAPI"
@@ -1679,65 +2645,23 @@ if [[ "$PROJECT_TYPE" =~ ^2$ ]]; then
             while true; do
                 read -p "请输入选项 [1-9]: " BACKEND_CHOICE
                 case "$BACKEND_CHOICE" in
-                    1) init_backend_stack "$BACKEND_PATH" fastapi; break ;;
-                    2) init_backend_stack "$BACKEND_PATH" flask; break ;;
-                    3) init_backend_stack "$BACKEND_PATH" django; break ;;
-                    4) init_backend_stack "$BACKEND_PATH" express; break ;;
-                    5) init_backend_stack "$BACKEND_PATH" nest; break ;;
-                    6) init_backend_stack "$BACKEND_PATH" gin; break ;;
-                    7) init_backend_stack "$BACKEND_PATH" axum; break ;;
-                    8) init_backend_stack "$BACKEND_PATH" custom; break ;;
+                    1) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" fastapi; break ;;
+                    2) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" flask; break ;;
+                    3) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" django; break ;;
+                    4) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" express; break ;;
+                    5) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" nest; break ;;
+                    6) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" gin; break ;;
+                    7) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" axum; break ;;
+                    8) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" custom; break ;;
                     9) echo -e "${YELLOW}已跳过后端初始化${NC}"; break ;;
                     *) echo -e "${YELLOW}请输入 1-9 的有效选项${NC}" ;;
                 esac
             done
         fi
+
     fi
 else
-    echo -e "${BLUE}请选择前端技术栈:${NC}"
-    echo -e "  1) Node.js (JavaScript)"
-    echo -e "  2) TypeScript"
-    echo -e "  3) 自定义命令"
-    echo -e "  4) 跳过前端"
-    while true; do
-        read -p "请输入选项 [1-4]: " FRONT_CHOICE
-        case "$FRONT_CHOICE" in
-            1) init_frontend_stack "$FRONTEND_PATH" node; break ;;
-            2) init_frontend_stack "$FRONTEND_PATH" ts; break ;;
-            3) init_frontend_stack "$FRONTEND_PATH" custom; break ;;
-            4) init_frontend_stack "$FRONTEND_PATH" skip; break ;;
-            *) echo -e "${YELLOW}请输入 1-4 的有效选项${NC}" ;;
-        esac
-    done
-
-    if prompt_yes_no "是否需要初始化后端?" "n"; then
-        echo -e "${BLUE}请选择后端技术栈:${NC}"
-        echo -e "  1) FastAPI"
-        echo -e "  2) Flask"
-        echo -e "  3) Django"
-        echo -e "  4) Express"
-        echo -e "  5) NestJS"
-        echo -e "  6) Go (Gin)"
-        echo -e "  7) Rust (Axum)"
-        echo -e "  8) 自定义命令"
-        echo -e "  9) 跳过"
-        while true; do
-            read -p "请输入选项 [1-9]: " BACKEND_CHOICE
-            case "$BACKEND_CHOICE" in
-                1) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" fastapi; break ;;
-                2) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" flask; break ;;
-                3) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" django; break ;;
-                4) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" express; break ;;
-                5) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" nest; break ;;
-                6) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" gin; break ;;
-                7) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" axum; break ;;
-                8) init_backend_stack "$PROJECT_DIR/$BACKEND_DIR" custom; break ;;
-                9) echo -e "${YELLOW}已跳过后端初始化${NC}"; break ;;
-                *) echo -e "${YELLOW}请输入 1-9 的有效选项${NC}" ;;
-            esac
-        done
-    fi
-
+    echo -e "${YELLOW}⏭️ 已跳过 Step 5${NC}"
 fi
 
 # ==========================================
@@ -1745,37 +2669,87 @@ fi
 # ==========================================
 echo -e "\n${YELLOW}[Step 6] 创建目录结构...${NC}"
 
-if prompt_yes_no "是否创建标准目录结构 (src, tests/unit, tests/e2e, docs, logs)?" "y"; then
-    ensure_dir "src"
-    ensure_dir "tests/unit"
-    ensure_dir "$TESTS_DIR"
-    ensure_dir "docs"
-    ensure_dir "logs"
+if prompt_yes_no "是否执行 Step 6（创建目录结构）?" "y"; then
+    if prompt_yes_no "是否创建标准目录结构 (src, tests/unit, tests/e2e, docs, logs)?" "y"; then
+        ensure_dir "src"
+        ensure_dir "tests/unit"
+        ensure_dir "$TESTS_DIR"
+        ensure_dir "docs"
+        ensure_dir "logs"
+    else
+        ensure_dir "$TESTS_DIR"
+        ensure_dir "docs"
+        ensure_dir "logs"
+    fi
+
+    if [ -n "$FRONTEND_DIR" ]; then
+        ensure_dir "$FRONTEND_DIR"
+    fi
+
+        ensure_dir "$PLAYWRIGHT_CONFIG_DIR/playwright"
+
+        # Playwright 配置
+        if [ -n "$FRONTEND_DIR" ]; then
+                PLAYWRIGHT_CONFIG_PATH="$FRONTEND_DIR/playwright.config.ts"
+                mkdir -p "$FRONTEND_DIR/playwright"
+        else
+                PLAYWRIGHT_CONFIG_PATH="playwright.config.ts"
+                mkdir -p "playwright"
+        fi
+
+        SKIP_STEP6=false
+        if [ -f "$PLAYWRIGHT_CONFIG_PATH" ]; then
+            if ! prompt_yes_no "检测到 $PLAYWRIGHT_CONFIG_PATH 已存在，是否覆盖?" "n"; then
+                echo -e "${YELLOW}⏭️ 已跳过 Step 6${NC}"
+                SKIP_STEP6=true
+            fi
+        fi
+
+        if [ "$SKIP_STEP6" = false ]; then
+        cat << TS_EOF > "$PLAYWRIGHT_CONFIG_PATH"
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+    testDir: './tests/e2e',
+    fullyParallel: true,
+    retries: process.env.CI ? 2 : 0,
+  
+    use: {
+        baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:$DEFAULT_PORT',
+        headless: true,
+        trace: 'on-first-retry',
+        screenshot: 'only-on-failure',
+    },
+  
+    reporter: [['list']],
+  
+    projects: [
+        { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    ],
+});
+TS_EOF
+
+        echo -e "${GREEN}✓ $PLAYWRIGHT_CONFIG_PATH${NC}"
+
+        echo -e "${GREEN}✓ 目录结构已创建${NC}"
+        fi
 else
-    ensure_dir "$TESTS_DIR"
-    ensure_dir "docs"
-    ensure_dir "logs"
+    echo -e "${YELLOW}⏭️ 已跳过 Step 6${NC}"
 fi
-
-if [ -n "$FRONTEND_DIR" ]; then
-    ensure_dir "$FRONTEND_DIR"
-fi
-
-ensure_dir "$PLAYWRIGHT_CONFIG_DIR/playwright"
-
-echo -e "${GREEN}✓ 目录结构已创建${NC}"
 
 # ==========================================
 # Step 7: 创建 .mcp.json
 # ==========================================
 echo -e "\n${YELLOW}[Step 7] 创建 .mcp.json...${NC}"
 
-if [ -f ".mcp.json" ]; then
-    cp .mcp.json .mcp.json.backup.$(date +%Y%m%d_%H%M%S)
-    echo -e "${YELLOW}  已备份现有 .mcp.json${NC}"
-fi
-
-cat << 'EOF' > .mcp.json
+if prompt_yes_no "是否执行 Step 7（创建 .mcp.json）?" "y"; then
+    if [ -f ".mcp.json" ]; then
+        if ! prompt_yes_no "检测到 .mcp.json 已存在，是否覆盖?" "n"; then
+            echo -e "${YELLOW}⏭️ 已跳过 Step 7${NC}"
+        else
+            cp .mcp.json .mcp.json.backup.$(date +%Y%m%d_%H%M%S)
+            echo -e "${YELLOW}  已备份现有 .mcp.json${NC}"
+            cat << 'EOF' > .mcp.json
 {
     "mcpServers": {
         "playwright": {
@@ -1789,81 +2763,83 @@ cat << 'EOF' > .mcp.json
     }
 }
 EOF
-
-echo -e "${GREEN}✓ .mcp.json${NC}"
+            echo -e "${GREEN}✓ .mcp.json${NC}"
+        fi
+    else
+        cat << 'EOF' > .mcp.json
+{
+    "mcpServers": {
+        "playwright": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-playwright"]
+        },
+        "browser-use": {
+            "command": "uvx",
+            "args": ["browser-use-mcp"]
+        }
+    }
+}
+EOF
+        echo -e "${GREEN}✓ .mcp.json${NC}"
+    fi
+else
+    echo -e "${YELLOW}⏭️ 已跳过 Step 7${NC}"
+fi
 
 # ==========================================
 # Step 8: 创建示例测试和配置
 # ==========================================
 echo -e "\n${YELLOW}[Step 8] 创建辅助文件...${NC}"
 
-# 示例测试
-cat << 'TS_EOF' > "$TESTS_DIR/example.spec.ts"
+if prompt_yes_no "是否执行 Step 8（创建辅助文件）?" "y"; then
+        SKIP_STEP8=false
+        if [ -f "$TESTS_DIR/example.spec.ts" ]; then
+            if ! prompt_yes_no "检测到 $TESTS_DIR/example.spec.ts 已存在，是否覆盖?" "n"; then
+                echo -e "${YELLOW}⏭️ 已跳过 Step 8${NC}"
+                SKIP_STEP8=true
+            fi
+        fi
+        if [ "$SKIP_STEP8" = false ]; then
+        # 示例测试
+        cat << 'TS_EOF' > "$TESTS_DIR/example.spec.ts"
 import { test, expect } from '@playwright/test';
 
 test.describe('示例测试', () => {
-  test('首页加载', async ({ page }) => {
-    await page.goto('/');
-    await expect(page).toHaveTitle(/.*/);
-  });
+    test('首页加载', async ({ page }) => {
+        await page.goto('/');
+        await expect(page).toHaveTitle(/.*/);
+    });
 });
 TS_EOF
 
-echo -e "${GREEN}✓ $TESTS_DIR/example.spec.ts${NC}"
+        echo -e "${GREEN}✓ $TESTS_DIR/example.spec.ts${NC}"
 
-# Playwright 配置
-if [ -n "$FRONTEND_DIR" ]; then
-    PLAYWRIGHT_CONFIG_PATH="$FRONTEND_DIR/playwright.config.ts"
-    mkdir -p "$FRONTEND_DIR/playwright"
+        # .gitignore (追加缺失项)
+        append_line_if_missing .gitignore "# Ralph"
+        append_line_if_missing .gitignore "logs/"
+        append_line_if_missing .gitignore "test-results/"
+        append_line_if_missing .gitignore "playwright-report/"
+        append_line_if_missing .gitignore "!docs/"
+        append_line_if_missing .gitignore "!docs/plans/"
+        append_line_if_missing .gitignore "!$TESTS_DIR/"
+        append_line_if_missing .gitignore "# Node / System"
+        append_line_if_missing .gitignore "node_modules/"
+        append_line_if_missing .gitignore ".env"
+        append_line_if_missing .gitignore ".env.*"
+        append_line_if_missing .gitignore ".DS_Store"
+        append_line_if_missing .gitignore "dist/"
+        append_line_if_missing .gitignore "build/"
+        append_line_if_missing .gitignore "coverage/"
+        append_line_if_missing .gitignore "__pycache__/"
+        append_line_if_missing .gitignore "*.pyc"
+        append_line_if_missing .gitignore ".venv/"
+        append_line_if_missing .gitignore ".pytest_cache/"
+
+        echo -e "${GREEN}✓ 辅助文件已创建${NC}"
+        fi
 else
-    PLAYWRIGHT_CONFIG_PATH="playwright.config.ts"
-    mkdir -p "playwright"
+        echo -e "${YELLOW}⏭️ 已跳过 Step 8${NC}"
 fi
-
-cat << TS_EOF > "$PLAYWRIGHT_CONFIG_PATH"
-import { defineConfig, devices } from '@playwright/test';
-
-export default defineConfig({
-  testDir: './tests/e2e',
-  fullyParallel: true,
-  retries: process.env.CI ? 2 : 0,
-  
-  use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:$DEFAULT_PORT',
-    headless: true,
-    trace: 'on-first-retry',
-    screenshot: 'only-on-failure',
-  },
-  
-  reporter: [['list']],
-  
-  projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
-  ],
-});
-TS_EOF
-
-echo -e "${GREEN}✓ $PLAYWRIGHT_CONFIG_PATH${NC}"
-
-# .gitignore (追加缺失项)
-append_line_if_missing .gitignore "# Ralph"
-append_line_if_missing .gitignore "logs/"
-append_line_if_missing .gitignore "test-results/"
-append_line_if_missing .gitignore "playwright-report/"
-append_line_if_missing .gitignore "# Node / System"
-append_line_if_missing .gitignore "node_modules/"
-append_line_if_missing .gitignore ".env"
-append_line_if_missing .gitignore ".env.*"
-append_line_if_missing .gitignore ".DS_Store"
-append_line_if_missing .gitignore "dist/"
-append_line_if_missing .gitignore "build/"
-append_line_if_missing .gitignore "coverage/"
-append_line_if_missing .gitignore "__pycache__/"
-append_line_if_missing .gitignore "*.pyc"
-append_line_if_missing .gitignore ".venv/"
-append_line_if_missing .gitignore ".pytest_cache/"
-
-echo -e "${GREEN}✓ 辅助文件已创建${NC}"
 
 # ==========================================
 # 完成
@@ -1899,9 +2875,17 @@ echo -e "  claude"
 echo ""
 
 # ==========================================
-# Step 16: 生成 Manifest 文件
+# Step 9: 生成 Manifest 文件
 # ==========================================
-echo -e "\n${YELLOW}[Step 16] 生成安装清单...${NC}"
+echo -e "\n${YELLOW}[Step 9] 生成安装清单...${NC}"
+
+if [ -z "$PLAYWRIGHT_CONFIG_PATH" ]; then
+    if [ -n "$FRONTEND_DIR" ]; then
+        PLAYWRIGHT_CONFIG_PATH="$FRONTEND_DIR/playwright.config.ts"
+    else
+        PLAYWRIGHT_CONFIG_PATH="playwright.config.ts"
+    fi
+fi
 
 generate_manifest() {
     local manifest_file="$PROJECT_DIR/.template-manifest.json"
@@ -1941,8 +2925,12 @@ EOF
 
 # CI/CD
 if prompt_yes_no "是否生成 GitHub Actions CI?" "n"; then
-        ensure_dir ".github/workflows"
-        cat << 'EOF' > .github/workflows/ci.yml
+                if [ -f ".github/workflows/ci.yml" ]; then
+                    if ! prompt_yes_no "检测到 .github/workflows/ci.yml 已存在，是否覆盖?" "n"; then
+                        echo -e "${YELLOW}⏭️ 已跳过 CI 生成${NC}"
+                    else
+                        ensure_dir ".github/workflows"
+                        cat << 'EOF' > .github/workflows/ci.yml
 name: CI
 
 on:
@@ -1999,6 +2987,67 @@ jobs:
                 if: hashFiles('Cargo.toml') != ''
                 run: cargo test
 EOF
+                    fi
+                else
+                    ensure_dir ".github/workflows"
+                    cat << 'EOF' > .github/workflows/ci.yml
+name: CI
+
+on:
+    push:
+        branches: ["main"]
+    pull_request:
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up Node
+                if: hashFiles('package.json') != ''
+                uses: actions/setup-node@v4
+                with:
+                    node-version: 18
+                    cache: npm
+
+            - name: Install Node deps
+                if: hashFiles('package.json') != ''
+                run: npm ci
+
+            - name: Node lint/typecheck/unit
+                if: hashFiles('package.json') != ''
+                run: |
+                    npm run lint --if-present
+                    npm run type-check --if-present
+                    npm run test:unit --if-present
+
+            - name: Set up Python
+                if: hashFiles('requirements.txt') != '' || hashFiles('pyproject.toml') != ''
+                uses: actions/setup-python@v5
+                with:
+                    python-version: '3.11'
+
+            - name: Install Python deps
+                if: hashFiles('requirements.txt') != ''
+                run: pip install -r requirements.txt
+
+            - name: Python lint/typecheck/unit
+                if: hashFiles('requirements.txt') != '' || hashFiles('pyproject.toml') != ''
+                run: |
+                    ruff check . || true
+                    mypy . || true
+                    pytest -q || true
+
+            - name: Go test
+                if: hashFiles('go.mod') != ''
+                run: go test ./...
+
+            - name: Rust test
+                if: hashFiles('Cargo.toml') != ''
+                run: cargo test
+EOF
+                fi
 fi
     
     cat << MANIFEST_EOF > "$manifest_file"
@@ -2051,9 +3100,21 @@ MANIFEST_EOF
     echo -e "${GREEN}✓ .template-manifest.json${NC}"
 }
 
-generate_manifest
-
-echo -e "${GREEN}✓ .template-manifest.json${NC}"
+if prompt_yes_no "是否执行 Step 9（生成安装清单）?" "y"; then
+    if [ -f "$PROJECT_DIR/.template-manifest.json" ]; then
+        if ! prompt_yes_no "检测到 $PROJECT_DIR/.template-manifest.json 已存在，是否覆盖?" "n"; then
+            echo -e "${YELLOW}⏭️ 已跳过 Step 9${NC}"
+        else
+            generate_manifest
+            echo -e "${GREEN}✓ .template-manifest.json${NC}"
+        fi
+    else
+        generate_manifest
+        echo -e "${GREEN}✓ .template-manifest.json${NC}"
+    fi
+else
+    echo -e "${YELLOW}⏭️ 已跳过 Step 9${NC}"
+fi
 
 else
     echo -e "${YELLOW}⏭️ 已跳过项目配置${NC}"
