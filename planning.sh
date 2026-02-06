@@ -895,6 +895,12 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
   如果项目尚未配置任何验证工具或为空仓，标注为 N/A，并给出"最小可行验证命令"建议。
   如果 AGENT.md 中缺少项目已配置的验证工具的对应命令，或包管理器不匹配，判定 FAIL。
 
+  **2d. Lint/Typecheck 覆盖 (Lint & Typecheck Coverage)**
+  AGENT.md 必须包含：
+  - 前端：pnpm lint、pnpm type-check
+  - 后端：ruff check .、mypy app
+  缺失任一项判定 FAIL。
+
 3. **命令可执行性 (Commands Executable)**
   AGENT.md 中的每条命令都应在当前项目环境中可直接执行。检查：
   - 命令中引用的脚本是否存在（如 package.json 中是否定义了对应的 npm script）
@@ -978,6 +984,8 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
 总评: X/8 通过
 
 然后针对每个 FAIL 项，在表格下方逐项给出具体修改建议。修改建议必须是可以直接插入或替换到 AGENT.md 中的实际文本，不要只写"建议添加测试命令"这种笼统描述。
+
+所有修改建议必须给出"建议插入位置"和"可直接粘贴的文本"，并提供可直接执行的 bash 修复命令。
 
 如果检查项 1 判定 FAIL（文件不存在），则在修改建议中给出一份完整的 AGENT.md 初始内容草稿，基于项目的 package.json / pyproject.toml 等配置文件推导出正确的命令。
 
@@ -1331,6 +1339,18 @@ if prompt_yes_no "是否执行测试配置核查与测试生成?" "y"; then
 - 测试运行但失败 → FAIL（列出错误摘要）
 - 测试运行并通过 → PASS
 
+## 常见问题快速修补（如命中则必须给出可执行命令）
+1) Vitest 误收集 Playwright 测试：
+  - 目标文件：frontend/vitest.config.ts
+  - 需要包含 include: ['src/**/*.{test,spec}.{ts,tsx}']
+  - 需要排除 exclude: ['**/tests/e2e/**', '**/node_modules/**']
+2) ESLint 解析 TypeScript 失败：
+  - 如果是 Next.js 项目：.eslintrc.json 使用 extends ["next/core-web-vitals", "plugin:prettier/recommended"]
+  - 如果不是 Next.js：安装 @typescript-eslint/parser 和 @typescript-eslint/eslint-plugin，并配置 parser/extends
+3) mypy 模块名冲突：
+  - 目标文件：backend/mypy.ini
+  - 需要添加 explicit_package_bases = true 与 namespace_packages = true
+
 ## 输出要求
 1) 输出一张汇总表：
 
@@ -1339,7 +1359,8 @@ if prompt_yes_no "是否执行测试配置核查与测试生成?" "y"; then
 
 2) 对每个 FAIL 项，列出：
    - 失败原因摘要
-   - 建议的修改方案（具体到要修改的文件和内容）
+  - 建议的修改方案（具体到要修改的文件和内容）
+  - 必须提供可直接执行的 bash 修复命令（如 cat <<'EOF' > file ...）
 
 3) 给出"修改计划"（按步骤编号），然后问我：
 

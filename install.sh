@@ -1229,13 +1229,41 @@ install_eslint_prettier() {
             ;;
     esac
     if [ ! -f ".eslintrc.json" ] && [ ! -f "eslint.config.js" ]; then
-        cat << 'EOF' > .eslintrc.json
+                if has_pkg_dep "next"; then
+                        cat << 'EOF' > .eslintrc.json
 {
-  "env": { "browser": true, "node": true, "es2021": true },
-  "extends": ["eslint:recommended", "plugin:prettier/recommended"],
-  "parserOptions": { "ecmaVersion": "latest", "sourceType": "module" }
+    "extends": ["next/core-web-vitals", "plugin:prettier/recommended"]
 }
 EOF
+                elif has_typescript_dep || [ -f "tsconfig.json" ]; then
+                        case "$manager" in
+                                pnpm)
+                                        pnpm add -D @typescript-eslint/parser @typescript-eslint/eslint-plugin
+                                        ;;
+                                yarn)
+                                        yarn add -D @typescript-eslint/parser @typescript-eslint/eslint-plugin
+                                        ;;
+                                *)
+                                        npm install -D @typescript-eslint/parser @typescript-eslint/eslint-plugin
+                                        ;;
+                        esac
+                        cat << 'EOF' > .eslintrc.json
+{
+    "env": { "browser": true, "node": true, "es2021": true },
+    "extends": ["eslint:recommended", "plugin:@typescript-eslint/recommended", "plugin:prettier/recommended"],
+    "parser": "@typescript-eslint/parser",
+    "parserOptions": { "ecmaVersion": "latest", "sourceType": "module" }
+}
+EOF
+                else
+                        cat << 'EOF' > .eslintrc.json
+{
+    "env": { "browser": true, "node": true, "es2021": true },
+    "extends": ["eslint:recommended", "plugin:prettier/recommended"],
+    "parserOptions": { "ecmaVersion": "latest", "sourceType": "module" }
+}
+EOF
+                fi
     fi
     if [ ! -f ".prettierrc" ]; then
         cat << 'EOF' > .prettierrc
@@ -1268,6 +1296,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
+        include: ['src/**/*.{test,spec}.{ts,tsx}'],
+        exclude: ['**/tests/e2e/**', '**/node_modules/**'],
   },
 });
 EOF
@@ -1868,6 +1898,8 @@ EOF
 [mypy]
 python_version = 3.11
 ignore_missing_imports = true
+explicit_package_bases = true
+namespace_packages = true
 EOF
         fi
     fi
