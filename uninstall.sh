@@ -177,25 +177,35 @@ remove_root_item() {
 
     if [ -z "$abs" ] || [[ "$abs" != "$SCRIPT_DIR/"* ]]; then
         log_error "路径不在模板根目录内，跳过: $item"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
         return 1
     fi
 
     if [ "$abs" = "$SCRIPT_DIR" ]; then
         log_error "禁止删除模板根目录: $item"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
         return 1
     fi
 
     if [ ! -e "$abs" ]; then
         log_skip "不存在: $item"
+        SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
         return 0
     fi
 
     if [ "$DRY_RUN" = true ]; then
         echo -e "  ${YELLOW}[DRY-RUN]${NC} 将删除: $item"
+        DELETED_COUNT=$((DELETED_COUNT + 1))
         return 0
     fi
 
-    rm -rf "$abs" && log_success "已删除: $item" || log_error "删除失败: $item"
+    if rm -rf "$abs"; then
+        log_success "已删除: $item"
+        DELETED_COUNT=$((DELETED_COUNT + 1))
+    else
+        log_error "删除失败: $item"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+    fi
 }
 
 # ==========================================
