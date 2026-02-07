@@ -9,9 +9,11 @@
 !.gitignore
 !install.sh
 !planning.sh
+!terminal_manager.sh
 !README.md
 !readme.md
 !restore.sh
 !uninstall.sh
 !loop.sh
 !ralph_reset.sh
+!run_dev.sh
