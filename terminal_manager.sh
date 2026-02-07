@@ -9,6 +9,10 @@ Usage: ./terminal_manager.sh <command> [args]
 
 Commands:
   list                             List user processes with notes and ports
+  vscode-terminals                 List VS Code terminal processes (ptyHost)
+  kill-vscode-terminals [--force]  Kill VS Code terminal processes (ptyHost children)
+  kill-vscode-shells [--force]     Kill VS Code shellIntegration bash processes
+  reset-vscode-terminals [--force] [--kill-ptyhost] Disable terminal restore and optionally restart ptyHost
   note <pid> "comment"             Add/update note for a PID
   note-pane <session:win.pane> "comment"  Add/update note for a tmux pane
   kill <pid> [--force]             Kill process by PID
@@ -114,6 +118,190 @@ list_processes() {
   done
 }
 
+list_vscode_terminals() {
+  local pty_pids
+  pty_pids=$(pgrep -f "bootstrap-fork --type=ptyHost" || true)
+  if [ -z "$pty_pids" ]; then
+    echo "No VS Code ptyHost process found."
+    return 0
+  fi
+
+  echo "VS Code ptyHost PID(s): $pty_pids"
+  echo "PID  PPID TTY   STAT ELAPSED CMD"
+
+  local total=0
+  while read -r pty_pid; do
+    if [ -z "$pty_pid" ]; then
+      continue
+    fi
+    local child_pids
+    child_pids=$(pgrep -P "$pty_pid" || true)
+    if [ -n "$child_pids" ]; then
+      local count
+      count=$(echo "$child_pids" | wc -l | tr -d ' ')
+      total=$((total + count))
+      ps -o pid=,ppid=,tty=,stat=,etimes=,args= -p $(echo "$child_pids" | tr '\n' ' ') || true
+    fi
+  done <<< "$pty_pids"
+
+  echo ""
+  echo "Estimated VS Code terminal process count: $total"
+}
+
+update_vscode_terminal_settings() {
+  local settings_file="$HOME/.vscode-server/data/User/settings.json"
+  local force="${1:-}"
+  mkdir -p "$(dirname "$settings_file")"
+  python3 - <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path.home() / ".vscode-server" / "data" / "User" / "settings.json"
+data = {}
+if path.exists():
+  try:
+    data = json.loads(path.read_text())
+  except Exception:
+    data = {}
+
+missing = [
+  "terminal.integrated.enablePersistentSessions",
+  "terminal.integrated.enableSessionRestore",
+]
+
+if any(k not in data for k in missing):
+  print("MISSING_KEYS")
+  sys.exit(2)
+
+data["terminal.integrated.enablePersistentSessions"] = False
+data["terminal.integrated.enableSessionRestore"] = False
+
+path.write_text(json.dumps(data, indent=2) + "\n")
+print(f"Updated {path}")
+PY
+  local status=$?
+  if [ $status -eq 2 ]; then
+    if [ "$force" = "--force" ]; then
+      python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path.home() / ".vscode-server" / "data" / "User" / "settings.json"
+data = {}
+if path.exists():
+  try:
+    data = json.loads(path.read_text())
+  except Exception:
+    data = {}
+
+data["terminal.integrated.enablePersistentSessions"] = False
+data["terminal.integrated.enableSessionRestore"] = False
+
+path.write_text(json.dumps(data, indent=2) + "\n")
+print(f"Updated {path}")
+PY
+      return 0
+    fi
+
+    read -r -p "Missing terminal restore settings. Add them now? [y/N]: " ans
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+      python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path.home() / ".vscode-server" / "data" / "User" / "settings.json"
+data = {}
+if path.exists():
+  try:
+    data = json.loads(path.read_text())
+  except Exception:
+    data = {}
+
+data["terminal.integrated.enablePersistentSessions"] = False
+data["terminal.integrated.enableSessionRestore"] = False
+
+path.write_text(json.dumps(data, indent=2) + "\n")
+print(f"Updated {path}")
+PY
+      return 0
+    fi
+
+    echo "Terminal restore settings not added. Cannot continue terminal cleanup." >&2
+    return 1
+  fi
+}
+
+kill_vscode_terminals() {
+  local pty_pids
+  pty_pids=$(pgrep -f "bootstrap-fork --type=ptyHost" || true)
+  if [ -z "$pty_pids" ]; then
+    echo "No VS Code ptyHost process found."
+    return 0
+  fi
+
+  local child_pids
+  child_pids=$(pgrep -P "$pty_pids" || true)
+  if [ -z "$child_pids" ]; then
+    echo "No VS Code terminal processes found."
+    return 0
+  fi
+
+  local child_list
+  child_list=$(echo "$child_pids" | tr '\n' ' ')
+  if confirm_kill "VS Code terminal processes ($child_list)" "${1:-}"; then
+    kill $child_list
+  fi
+}
+
+kill_vscode_shells() {
+  local shell_pids
+  shell_pids=$(pgrep -f "shellIntegration-bash.sh" || true)
+  if [ -z "$shell_pids" ]; then
+    echo "No VS Code shellIntegration bash processes found."
+    return 0
+  fi
+
+  local shell_list
+  shell_list=$(echo "$shell_pids" | tr '\n' ' ')
+  if confirm_kill "VS Code shellIntegration bash processes ($shell_list)" "${1:-}"; then
+    kill $shell_list
+  fi
+}
+
+reset_vscode_terminals() {
+  local force=""
+  local kill_ptyhost=""
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force="--force" ;;
+      --kill-ptyhost) kill_ptyhost="yes" ;;
+    esac
+  done
+
+  update_vscode_terminal_settings "$force" || return 1
+
+  kill_vscode_shells "$force"
+
+  if [ "$kill_ptyhost" != "yes" ]; then
+    echo "Skipping ptyHost restart (use --kill-ptyhost to force)."
+    return 0
+  fi
+
+  local pty_pids
+  pty_pids=$(pgrep -f "bootstrap-fork --type=ptyHost" || true)
+  if [ -z "$pty_pids" ]; then
+    echo "No VS Code ptyHost process found."
+    return 0
+  fi
+
+  local pty_list
+  pty_list=$(echo "$pty_pids" | tr '\n' ' ')
+  if confirm_kill "VS Code ptyHost process ($pty_list)" "$force"; then
+    kill $pty_list
+  fi
+}
+
 kill_port() {
   local port="$1"
   require_arg "$port" "Missing port"
@@ -159,6 +347,10 @@ menu() {
 cmd="${1:-help}"
 case "$cmd" in
   list) list_processes ;;
+  vscode-terminals) list_vscode_terminals ;;
+  kill-vscode-terminals) kill_vscode_terminals "${2:-}" ;;
+  kill-vscode-shells) kill_vscode_shells "${2:-}" ;;
+  reset-vscode-terminals) reset_vscode_terminals "${2:-}" ;;
   note)
     require_arg "${2:-}" "Missing PID"
     require_arg "${3:-}" "Missing note"
