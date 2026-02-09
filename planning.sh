@@ -254,6 +254,7 @@ prepare_design_context() {
 RUN_STEP2=false
 RUN_STEP3=false
 RUN_STEP4=false
+RUN_STEP45=false
 
 if prompt_yes_no "是否执行 Step 2: /write-plan 生成待办清单?" "y"; then
   RUN_STEP2=true
@@ -263,6 +264,9 @@ if prompt_yes_no "是否执行 Step 3: 汇总 design + todo?" "y"; then
 fi
 if prompt_yes_no "是否执行 Step 4: Headless 整理需求文件?" "y"; then
   RUN_STEP4=true
+fi
+if prompt_yes_no "是否执行 Step 4.5: 交互式 Review my_requirements.md?" "y"; then
+  RUN_STEP45=true
 fi
 
 if $RUN_STEP2 || $RUN_STEP3 || $RUN_STEP4; then
@@ -369,6 +373,67 @@ EOF
   echo -e "${GREEN}✓ 已完成整理并输出到 $REQ_FILE${NC}"
 else
   echo -e "${YELLOW}⏭️ 已跳过 Step 4${NC}"
+fi
+
+# ==========================================
+# Step 4.5: 交互式 Review my_requirements.md
+# ==========================================
+
+if $RUN_STEP45; then
+  if [ ! -f "$REQ_FILE" ]; then
+    echo -e "${RED}❌ 未找到 $REQ_FILE，无法 Review。请先执行 Step 3 或 Step 4，或手动准备该文件${NC}"
+    exit 1
+  fi
+
+  echo -e "${CYAN}🧾 启动 Claude Code（交互式）Review $REQ_FILE...${NC}"
+  if ! (cd "$PROJECT_DIR" && claude "$(cat <<'EOF'
+你是需求文档审查与完善助手。你的任务是严格审查并完善 my_requirements.md，使其成为后续所有开发与验收的唯一依据。
+
+⚠️ 在我明确说"执行"之前，禁止修改任何文件。
+
+请读取 my_requirements.md 的完整内容，并基于以下要求进行 Review 与补全。你必须输出一个“可直接替换原文件”的完整版本。
+
+## 必须补全的内容（全部写清楚，不能遗漏）
+1) **开发顺序与依赖**：按模块、子模块、数据层 → API → 前端 → 测试的顺序排列。
+2) **每个模块完成后的代码检查**：必须列出 lint / typecheck / build / 数据库迁移检查等。
+3) **测试流程与门禁规则**：
+   - 每段完成的代码都要运行测试（单元/集成/E2E），并明确触发条件与顺序。
+   - 测试失败必须打回重做，禁止标记完成、禁止提交。
+   - 如果因环境或依赖导致无法通过测试，必须标注为 [BLOCKED] 并记录原因与下一步。
+4) **UI 细节**：每个页面有哪些按钮、布局结构、表格字段、筛选条件、操作流程必须写清楚。
+5) **操作流程**：每个功能的点击路径、操作步骤、状态变化、异常处理。
+
+## 必须反映的已遇到问题与防复发规则
+- fix_plan.md 勾选与实际代码不一致导致“误完成”。
+- Claude 额度限制提示变化（"hit your limit"）导致未识别。
+- 额度触发后默认超时退出，未能自动等待。
+- ALLOWED_TOOLS 与实际命令不匹配导致权限拒绝。
+- 测试未执行导致任务误判完成。
+
+请在文档中加入“防复发规则”章节，明确：
+- **任何任务完成前必须有可验证证据（代码+测试通过日志）**。
+- **测试失败必须打回并重做**。
+- **额度限制识别与等待策略**。
+- **ALLOWED_TOOLS 与 AGENT.md 命令一致性检查**。
+
+## 输出要求
+1) 先输出“审查结论摘要”（10-15条要点），列出原文件缺失点与风险。
+2) 再输出“可直接替换的完整 my_requirements.md 内容”。
+3) 最后问我是否执行替换：
+
+> 你可以：
+> 1. 输入 **"执行"** — 我将写入修订后的完整内容
+> 2. 告诉我需要修改的地方 — 我会调整后重新输出
+> 3. 输入 **"跳过"** — 不做修改
+
+在收到我的回复前，不要修改任何文件。
+EOF
+)" ); then
+    echo -e "${RED}❌ Claude CLI 启动失败或已退出，请检查登录状态或网络${NC}"
+    exit 1
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过 Step 4.5${NC}"
 fi
 
 # ==========================================
@@ -479,7 +544,7 @@ if prompt_yes_no "是否审计 .ralph/PROMPT.md?" "y"; then
 
 ⚠️ 在我明确说"执行"之前，禁止修改任何文件。
 
-读取 .ralph/PROMPT.md 的完整内容，同时读取 .ralph/AGENT.md 作为测试命令对照，按以下 9 项检查标准逐一评估。每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议——给出建议添加或替换的实际文本内容，而不是笼统的描述。
+读取 .ralph/PROMPT.md 的完整内容，同时读取 .ralph/AGENT.md 作为测试命令对照，按以下 12 项检查标准逐一评估。每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议——给出建议添加或替换的实际文本内容，而不是笼统的描述。
 
 检查项：
 
@@ -542,6 +607,36 @@ if prompt_yes_no "是否审计 .ralph/PROMPT.md?" "y"; then
   - 若项目包含前后端，PROMPT.md 需明确分别验证前端与后端
   若存在缺失或不一致，判定 FAIL。
 
+10. **测试门禁与回退规则 (Test Gate & Rollback)**
+  必须明确：任一测试失败 → 立刻停止标记完成、不得提交、必须打回重做。
+  若因环境/依赖导致无法通过测试，必须标注为 [BLOCKED] 并记录原因与下一步。
+  若缺失此约束，判定 FAIL。
+
+11. **防误完成机制 (Anti-False-Completion)**
+  必须明确要求：只有在“代码存在 + 测试通过 + 可复现实证据”时才能勾选 fix_plan。
+  严禁仅凭口头说明或缺失文件仍标记完成。
+  若缺失此约束，判定 FAIL。
+
+12. **额度限制与等待策略 (Rate Limit Handling)**
+  必须说明遇到额度限制/速率限制时的处理策略（例如等待重置后继续），不得直接退出。
+  若缺失此策略，判定 FAIL。
+
+13. **完成证据协议 (Completion Evidence Protocol)**
+  PROMPT.md 必须包含"完成证据协议"段落，要求：
+  - 标记任何任务 [x] 之前，必须在 docs/completion/ 创建证据文件
+  - 证据文件必须包含：实现的函数列表（文件路径+函数名）、功能描述、用户点击流程、E2E 测试文件路径
+  - E2E 测试通过才能标 [x]，不能通过则标 [BLOCKED: 原因]
+  - 证据文件模板参考 .ralph/specs/completion_evidence_template.md（如存在）
+  若缺失此协议，判定 FAIL。
+
+14. **退出前交叉验证 (Pre-Exit Cross Verification)**
+  PROMPT.md 必须要求在 EXIT_SIGNAL=true 之前：
+  - 遍历所有 [x] 项，确认对应的 docs/completion/ 证据文件存在
+  - 确认证据文件中引用的函数/文件在代码中确实存在
+  - 运行 .ralph/verify.sh --full（如存在）
+  - 生成 docs/final_verification_summary.md
+  若缺失此要求，判定 FAIL。
+
 输出要求：
 
 先输出一张汇总表，格式如下：
@@ -551,7 +646,7 @@ if prompt_yes_no "是否审计 .ralph/PROMPT.md?" "y"; then
 | 1 | 阶段化结构 | ✅/❌ | 一句话说明 |
 | ... | ... | ... | ... |
 
-总评: X/9 通过
+总评: X/14 通过
 
 然后针对每个 FAIL 项，在表格下方逐项给出具体修改建议。修改建议必须是可以直接插入或替换到 PROMPT.md 中的实际文本，不要只写"建议添加阶段结构"这种笼统描述。
 
@@ -602,7 +697,7 @@ if prompt_yes_no "是否审计 .ralph/fix_plan.md?" "y"; then
 
 ⚠️ 在我明确说"执行"之前，禁止修改任何文件。
 
-读取 .ralph/fix_plan.md 的完整内容，同时读取 .ralph/specs/ 目录下的所有文件作为上下文参考（用于判断任务是否覆盖了需求）。按以下 9 项检查标准逐一评估，每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议。
+读取 .ralph/fix_plan.md 的完整内容，同时读取 .ralph/specs/ 目录下的所有文件作为上下文参考（用于判断任务是否覆盖了需求）。按以下 11 项检查标准逐一评估，每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议。
 
 检查项：
 
@@ -657,6 +752,22 @@ if prompt_yes_no "是否审计 .ralph/fix_plan.md?" "y"; then
   - 大型项目（20+ 个源文件）：60-120 个任务
   如果当前项目尚无源码或为空仓，忽略该项或改为基于“预期规模”的估计，并说明依据。若任务太少（可能粒度过大）或太多（可能过度拆分导致上下文碎片化），给出警告。此项不判定硬性 FAIL，但需在说明中标注风险。
 
+10. **测试任务必备 (Test Tasks Required)**
+  每个功能模块必须包含明确的测试子任务（单元/集成/E2E 之一或组合）。
+  如果缺失测试任务，判定 FAIL。
+
+11. **禁止虚假勾选 (No False Checkmarks)**
+  任何标记为 [x] 的任务，必须能在代码中找到对应实现与测试证据。
+  若出现“代码不存在但任务已勾选”的情况，判定 FAIL，并要求回退为 [ ]。
+12. **BLOCKED 格式与证据关联 (BLOCKED Format & Evidence Link)**
+  fix_plan.md 必须在 Notes 或文件头部说明：
+  - BLOCKED 任务格式：`- [ ] [BLOCKED: 原因] 任务描述`
+  - 每个 [x] 必须有对应的 docs/completion/ 证据文件
+  - 证据文件命名规范：`<任务ID>-<简称>.md`
+  如果 fix_plan 中已有 [x] 标记但无上述说明，判定 FAIL。
+  如果已有 [x] 标记但 docs/completion/ 中无对应证据文件，在"禁止虚假勾选"检查项中一并标出。
+
+
 输出要求：
 
 先输出一张汇总表：
@@ -666,7 +777,7 @@ if prompt_yes_no "是否审计 .ralph/fix_plan.md?" "y"; then
 | 1 | Checkbox 格式 | ✅/❌ | 一句话说明 |
 | ... | ... | ... | ... |
 
-总评: X/9 通过
+总评: X/12 通过
 
 然后针对每个 FAIL 项，在表格下方逐项给出具体修改建议。修改建议必须是可以直接插入或替换到 fix_plan.md 中的实际文本（例如拆分后的具体任务列表、重新排序后的任务顺序），不要只写"建议拆分任务"这种笼统描述。
 
@@ -858,7 +969,7 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
 
 读取 .ralph/AGENT.md 的完整内容。同时读取 .ralph/PROMPT.md 作为交叉参考。
 
-按以下 8 项检查标准逐一评估，每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议。
+按以下 10 项检查标准逐一评估，每项评为 ✅ PASS 或 ❌ FAIL。FAIL 项必须附带具体的修改建议。
 
 检查项：
 
@@ -972,6 +1083,22 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
   - 后端测试命令（pytest/go test/cargo test）如在项目中存在，应覆盖
   缺失或不可达时判定 FAIL。
 
+9. **测试优先级与失败回退 (Test Priority & Rollback)**
+  必须明确：测试为最高要求；若测试失败必须回退并重新优化；不得在失败状态下继续推进。
+  若缺失该要求，判定 FAIL。
+
+10. **额度限制提示与等待策略 (Rate Limit Handling)**
+  必须说明：当出现“hit your limit / rate limit”时的等待策略或操作步骤，避免直接退出。
+  若缺失该策略，判定 FAIL。
+11. **验证脚本命令 (Verification Script Commands)**
+  如果项目存在 .ralph/verify.sh，AGENT.md 必须包含：
+  - 单任务验证命令：`bash .ralph/verify.sh --task <ID> --evidence docs/completion/<file>`
+  - 全量验证命令：`bash .ralph/verify.sh --full`
+  - 证据一致性检查：`bash .ralph/verify.sh --check-evidence`
+  如果 .ralph/verify.sh 存在但 AGENT.md 中无上述命令，判定 FAIL。
+  如果 .ralph/verify.sh 不存在，此项标为 N/A。
+
+
 输出要求：
 
 先输出一张汇总表：
@@ -981,7 +1108,7 @@ if prompt_yes_no "是否审计 AGENT.md?" "y"; then
 | 1 | 文件存在性 | ✅/❌ | 一句话说明 |
 | ... | ... | ... | ... |
 
-总评: X/8 通过
+总评: X/11 通过
 
 然后针对每个 FAIL 项，在表格下方逐项给出具体修改建议。修改建议必须是可以直接插入或替换到 AGENT.md 中的实际文本，不要只写"建议添加测试命令"这种笼统描述。
 
@@ -1443,4 +1570,166 @@ EOF
   fi
 else
   echo -e "${YELLOW}⏭️ 已跳过 Step 14${NC}"
+fi
+
+# ==========================================
+# Step 15: 完成证据目录初始化 + 验证脚本部署
+# ==========================================
+
+if prompt_yes_no "是否初始化完成证据目录和验证脚本?" "y"; then
+  echo -e "${CYAN}📂 部署完成证据系统...${NC}"
+
+  # 1. 创建 docs/completion/ 目录
+  mkdir -p "$PROJECT_DIR/docs/completion"
+  echo -e "${GREEN}    ✓ docs/completion/ 目录已创建${NC}"
+
+  # 2. 复制证据模板到 .ralph/specs/
+  TEMPLATE_DIR="$(cd "$(dirname "$0")/ralph-claude-code/templates" 2>/dev/null && pwd)"
+  if [ -z "$TEMPLATE_DIR" ]; then
+    TEMPLATE_DIR="$(cd "$(dirname "$0")/../ralph-claude-code/templates" 2>/dev/null && pwd)"
+  fi
+
+  if [ -n "$TEMPLATE_DIR" ] && [ -f "$TEMPLATE_DIR/specs/completion_evidence_template.md" ]; then
+    cp "$TEMPLATE_DIR/specs/completion_evidence_template.md" "$PROJECT_DIR/.ralph/specs/"
+    echo -e "${GREEN}    ✓ completion_evidence_template.md 已复制到 .ralph/specs/${NC}"
+  else
+    echo -e "${YELLOW}    ⚠️ 未找到 completion_evidence_template.md 模板${NC}"
+  fi
+
+  # 3. 复制 verify.sh 到 .ralph/
+  if [ -n "$TEMPLATE_DIR" ] && [ -f "$TEMPLATE_DIR/verify.sh" ]; then
+    cp "$TEMPLATE_DIR/verify.sh" "$PROJECT_DIR/.ralph/verify.sh"
+    chmod +x "$PROJECT_DIR/.ralph/verify.sh"
+    echo -e "${GREEN}    ✓ verify.sh 已复制到 .ralph/ 并设置可执行权限${NC}"
+  else
+    echo -e "${YELLOW}    ⚠️ 未找到 verify.sh 模板${NC}"
+  fi
+
+  # 4. 复制 verification.yaml 示例到 .ralph/specs/
+  if [ -n "$TEMPLATE_DIR" ] && [ -f "$TEMPLATE_DIR/specs/verification.yaml.example" ]; then
+    cp "$TEMPLATE_DIR/specs/verification.yaml.example" "$PROJECT_DIR/.ralph/specs/"
+    echo -e "${GREEN}    ✓ verification.yaml.example 已复制到 .ralph/specs/${NC}"
+  fi
+
+  echo -e "${GREEN}✓ 完成证据系统部署完毕${NC}"
+else
+  echo -e "${YELLOW}⏭️ 已跳过 Step 15${NC}"
+fi
+
+# ==========================================
+# Step 16: 深度验证规格生成 (verification.yaml)
+# ==========================================
+
+if prompt_yes_no "是否生成深度验证规格 (verification.yaml)?" "y"; then
+  SPECS_DIR="$PROJECT_DIR/.ralph/specs"
+  AGENT_FILE="$PROJECT_DIR/.ralph/AGENT.md"
+
+  if [ ! -d "$SPECS_DIR" ]; then
+    echo -e "${RED}❌ 未找到 $SPECS_DIR${NC}"
+    exit 1
+  fi
+
+  echo -e "${CYAN}🔬 启动 Claude Code（交互式）生成 verification.yaml...${NC}"
+  if ! (cd "$PROJECT_DIR" && claude "$(cat <<'EOF'
+你是 Ralph 深度验证配置生成助手。你的任务是根据项目的 specs 和实际目录结构，生成一份 verification.yaml 文件，用于自动化验证代码与需求的一致性。
+
+⚠️ 在我明确说"执行"之前，禁止修改或创建任何文件。
+
+请执行以下步骤：
+
+## 步骤 1：收集信息
+
+读取以下内容：
+1. .ralph/specs/ 目录下的所有文件（完整内容）
+2. .ralph/AGENT.md（获取测试/lint/build 命令）
+3. 项目目录结构（前 3 层，只看目录和文件名）
+4. 如果存在 .ralph/specs/verification.yaml.example，以它为格式参考
+
+## 步骤 2：识别验证点
+
+从 specs 文件中提取：
+
+**后端（如存在）**：
+- 数据模型：每个实体的文件路径、类名、关键字段
+- API 路由：每个端点的文件路径、端点格式
+- 数据库迁移工具和检查命令
+- 测试命令和必要测试文件
+
+**前端（如存在）**：
+- 页面文件：每个页面的路径和关键组件名
+- 组件文件：关键 UI 组件路径和必须包含的内容
+- 测试命令和必要测试文件
+
+**通用**：
+- 从 AGENT.md 提取 lint/typecheck/build 命令
+
+## 步骤 3：生成 verification.yaml
+
+按照 verification.yaml.example 的 YAML 格式（如果存在），输出完整的 verification.yaml。
+
+如果没有 example 文件，使用以下格式：
+```yaml
+version: "1.0"
+project_type: "auto"
+
+backend:
+  root: "backend"
+  models:
+    - file: "path/to/model.py"
+      class: "ClassName"
+      fields: ["field1", "field2"]
+  routes:
+    - file: "path/to/route.py"
+      endpoints: ["GET /endpoint", "POST /endpoint"]
+  migrations:
+    tool: "alembic"
+    check_command: "cd backend && alembic check"
+  tests:
+    command: "cd backend && pytest --tb=short -q"
+    required_files:
+      - "tests/test_xxx.py"
+
+frontend:
+  root: "frontend"
+  pages:
+    - file: "src/app/xxx/page.tsx"
+      contains: ["ComponentName"]
+  tests:
+    command: "cd frontend && pnpm test:unit --run"
+    required_files:
+      - "tests/unit/xxx.test.tsx"
+
+general:
+  lint_commands:
+    - "cd backend && ruff check ."
+    - "cd frontend && pnpm lint"
+  typecheck_commands:
+    - "cd backend && mypy app"
+  build_commands:
+    - "cd frontend && pnpm build"
+
+evidence:
+  dir: "docs/completion"
+  require_for_completed: true
+```
+
+## 输出要求
+
+1. 输出完整的 verification.yaml 文件内容
+2. 对于任何你不确定的验证点（例如不确定某个 model 文件的准确路径），用注释 `# [待确认]` 标注
+3. 然后问我：
+
+> 以上是 verification.yaml 的内容。你可以：
+> 1. 输入 **"执行"** — 我将创建 .ralph/specs/verification.yaml
+> 2. 告诉我要修改的地方 — 我会调整后重新展示
+> 3. 输入 **"跳过"** — 不创建此文件
+
+在收到我的回复前，不要创建或修改任何文件。
+EOF
+)" ); then
+    echo -e "${RED}❌ Claude CLI 启动失败或已退出，请检查登录状态或网络${NC}"
+    exit 1
+  fi
+else
+  echo -e "${YELLOW}⏭️ 已跳过 Step 16${NC}"
 fi
